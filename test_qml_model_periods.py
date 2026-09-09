@@ -5,6 +5,7 @@ checks pin the source-level contract without loading private runtime records.
 """
 
 from pathlib import Path
+import json
 import re
 import unittest
 
@@ -54,7 +55,7 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn("modelHistoryProcess.running", pending)
         self.assertRegex(
             pending,
-            r"!updateProcess\.running\s*&&\s*!hermesProcess\.running\s*&&\s*!antigravityProcess\.running",
+            r"!updateProcess\.running\s*&&\s*!hermesProcess\.running\s*&&\s*!modelHistoryProcess\.running",
         )
         self.assertIn("modelHistoryRequested", pending)
         self.assertLess(pending.index("modelHistoryProcess.command ="), pending.index("modelHistoryProcess.running = true"))
@@ -70,21 +71,62 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn("isFinite", share)
         self.assertIn("root.modelShare(modelData, root.models)", self.panel)
 
-    def test_models_have_explicit_unavailable_copy_and_antigravity_never_uses_quota(self):
-        for phrase in (
-            "documented Antigravity CLI",
-            "quota/credit status",
-            "historical model-token usage",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, self.panel)
-        source = self.block(self.panel, "function modelUsageSourceFor", "\n  function modelRows")
+    def test_models_have_explicit_generic_unavailable_copy(self):
+        source = self.block(self.panel, "function modelUsageSourceFor", "\n  function modelPeriodValues")
+        unavailable = self.block(self.panel, "function modelUnavailableText", "\n  function modelRows")
         self.assertIn('providerId === "hermes"', source)
-        self.assertIn("modelUsage/modelUsageByPeriod", source)
-        self.assertIn("quota/credit status", source)
-        self.assertIn("modelTokenSourceHasData", self.panel)
-        self.assertIn('providerId === "antigravity" && !modelTokenSourceHasData(p)', self.panel)
-        self.assertIn("Per-model token source unavailable", self.panel)
+        self.assertIn("modelUsageByPeriod", self.panel)
+        self.assertIn("modelUsage", self.panel)
+        self.assertIn("Per-model token source unavailable", unavailable)
+        self.assertIn("No model-token usage recorded", unavailable)
+        self.assertNotIn("providerId ===", unavailable)
+
+    def test_retired_provider_id_is_filtered_before_local_and_synced_display(self):
+        retired_provider_id = "antigravity"
+        helper = self.block(self.main, "readonly property string retiredProviderId", "\n  Process")
+        listing = self.block(self.main, "function applyAgentListing", "\n  Instantiator")
+        enabled = self.block(self.main, "property var enabledProviders", "\n  function providerEnabled")
+        provider_filter = self.block(self.main, "function providerEnabled", "\n  // All-time")
+        snapshots = self.block(self.main, "function aggregateSnapshots", "\n  // Snapshots keep")
+
+        self.assertIn(retired_provider_id, helper)
+        self.assertIn('return String(id || "") === root.retiredProviderId', helper)
+        self.assertRegex(listing, r"if\s*\(!root\.isRetiredProviderId\(id\)\)\s*ids\.push\(id\)")
+        self.assertIn("ids.push(id)", listing)
+        self.assertIn("root.isRetiredProviderId(id)", enabled)
+        self.assertIn("root.isRetiredProviderId(syncedId)", enabled)
+        self.assertRegex(provider_filter, r"if\s*\(root\.isRetiredProviderId\(id\)\)\s*return false")
+        self.assertIn("return true", provider_filter)
+        self.assertRegex(snapshots, r"if\s*\(root\.isRetiredProviderId\(providerId\)\)\s*continue")
+
+    def test_repository_has_no_removed_provider_references_and_keeps_defaults(self):
+        removed_provider = "anti" + "gravity"
+        text_suffixes = {".md", ".qml", ".py", ".json"}
+        occurrences = []
+        for path in ROOT.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in text_suffixes:
+                continue
+            if ".git" in path.parts or "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8").casefold()
+            occurrences.extend([path.relative_to(ROOT).as_posix()] * text.count(removed_provider))
+            with self.subTest(path=path.relative_to(ROOT).as_posix()):
+                self.assertNotIn(removed_provider, path.name.casefold())
+                if path not in {MAIN_PATH, Path(__file__)}:
+                    self.assertNotIn(removed_provider, text)
+
+        self.assertEqual(
+            sorted(occurrences),
+            ["Main.qml", "test_qml_model_periods.py"],
+            "Only the explicit retired-provider filter and its regression explanation may mention the retired ID",
+        )
+
+        manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["version"], "1.4.1")
+        providers = manifest["barWidget"]["defaults"]["providers"]
+        self.assertEqual(set(providers), {"claude", "codex", "fireworks", "hermes", "grok"})
+        self.assertTrue(all(config.get("enabled") is True for config in providers.values()))
+        self.assertFalse((ROOT / f"{removed_provider}-collector.py").exists())
 
     def test_period_data_propagates_and_hermes_routes_use_provider_route_keys(self):
         self.assertIn("modelUsageByPeriod", self.main)

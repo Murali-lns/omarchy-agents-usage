@@ -261,12 +261,12 @@ class TestModelHistoryCollector(unittest.TestCase):
                 history_path=self.history_path,
             )
 
-    def test_quota_fields_never_become_model_tokens(self):
+    def test_non_token_record_fields_never_become_model_tokens(self):
         self.write_record(
-            "antigravity.json",
+            "grok.json",
             {
-                **self.record(provider="antigravity"),
-                "limits": [{"title": "model quota", "percent": 0.5, "remaining": 42}],
+                **self.record(provider="grok"),
+                "limits": [{"title": "synthetic quota", "percent": 0.5, "remaining": 42}],
             },
         )
         result = self.collector.build_history(
@@ -274,7 +274,7 @@ class TestModelHistoryCollector(unittest.TestCase):
             now=datetime(2026, 9, 15, tzinfo=timezone.utc),
             history_path=self.history_path,
         )
-        periods = result["providers"]["antigravity"]["modelUsageByPeriod"]
+        periods = result["providers"]["grok"]["modelUsageByPeriod"]
         self.assertEqual(periods, {"today": {}, "7d": {}, "month": {}, "all": {}})
         serialized = json.dumps(result).lower()
         self.assertNotIn("percent", serialized)

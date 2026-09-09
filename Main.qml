@@ -3,10 +3,9 @@ import Quickshell
 import Quickshell.Io
 
 // The display side of agent usage. Omarchy's updater remains authoritative
-// for packaged collectors; this plugin also runs its guarded, user-owned
-// Antigravity fallback. Both write standard records into the usage directory;
-// this file discovers those records, watches them, and merges optional
-// snapshots synced from other machines.
+// for packaged collectors; this plugin runs the Hermes collector and the
+// supplemental model-history phase. This file discovers standard records,
+// watches them, and merges optional snapshots synced from other machines.
 Item {
   id: root
   visible: false
@@ -26,6 +25,13 @@ Item {
   property var agentIds: []
   property var agents: []
   property int dataRevision: 0
+  // Compatibility guard for records written before the provider was retired;
+  // every other standard record remains generically discoverable.
+  readonly property string retiredProviderId: "antigravity"
+
+  function isRetiredProviderId(id) {
+    return String(id || "") === root.retiredProviderId
+  }
 
   Process {
     id: listProcess
@@ -48,7 +54,10 @@ Item {
     for (var i = 0; i < lines.length; i++) {
       var name = lines[i].trim()
       if (name === ".model-history.json") continue
-      if (name.slice(-5) === ".json") ids.push(name.slice(0, -5))
+      if (name.slice(-5) === ".json") {
+        var id = name.slice(0, -5)
+        if (!root.isRetiredProviderId(id)) ids.push(id)
+      }
     }
     ids.sort()
     // Same list, same objects: reassigning the model would tear down every
@@ -169,34 +178,12 @@ Item {
     }
   }
 
-  readonly property string antigravityCollectorPath: {
-    var resolved = Qt.resolvedUrl("antigravity-collector.py").toString().replace(/^file:\/\//, "")
-    if (resolved && resolved.indexOf("/") !== -1) {
-      return resolved
-    }
-    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/antigravity-collector.py"
-  }
-
   readonly property string modelHistoryCollectorPath: {
     var resolved = Qt.resolvedUrl("model-history-collector.py").toString().replace(/^file:\/\//, "")
     if (resolved && resolved.indexOf("/") !== -1) {
       return resolved
     }
     return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/model-history-collector.py"
-  }
-
-  Process {
-    id: antigravityProcess
-    running: false
-    onExited: {
-      root.rescanAgents()
-      root.checkPendingUpdate()
-    }
-
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("agents/antigravity", text.trim())
-    }
   }
 
   // Model history is supplemental display data. It must run only after every
@@ -225,7 +212,7 @@ Item {
 
   function checkPendingUpdate() {
     if (!root.primaryLaunchInProgress && !updateProcess.running && !hermesProcess.running
-        && !antigravityProcess.running && !modelHistoryProcess.running) {
+        && !modelHistoryProcess.running) {
       if (root.modelHistoryRequested) {
         root.modelHistoryRequested = false
         modelHistoryProcess.command = root.modelHistoryCommand()
@@ -249,15 +236,6 @@ Item {
     return false
   }
 
-  function antigravityWanted(agentIds) {
-    if (!providerEnabled("antigravity")) return false
-    if (!agentIds || agentIds.length === 0) return true
-    for (var i = 0; i < agentIds.length; i++) {
-      if (agentIds[i] === "antigravity") return true
-    }
-    return false
-  }
-
   function updateWanted(agentIds) {
     if (!agentIds || agentIds.length === 0) return true
     for (var i = 0; i < agentIds.length; i++) {
@@ -273,31 +251,25 @@ Item {
     return cmd
   }
 
-  function antigravityCommand(kind) {
-    var cmd = [root.antigravityCollectorPath]
-    if (kind === "force") cmd.push("--force")
-    if (kind === "limits") cmd.push("--limits-only")
-    return cmd
-  }
-
   function updateCommand(kind, agentIds) {
     var command = ["omarchy-agent-usage-update"]
     if (kind === "force") command.push("--force")
     if (kind === "limits") command.push("--limits-only")
     var providers = settings && settings.providers ? settings.providers : {}
     for (var id in providers) {
+      if (root.isRetiredProviderId(id)) continue
       if (providers[id] && providers[id].enabled === false) command.push("--except", id)
     }
     if (agentIds) {
       for (var i = 0; i < agentIds.length; i++) {
-        if (agentIds[i] !== "hermes") command.push(agentIds[i])
+        if (!root.isRetiredProviderId(agentIds[i]) && agentIds[i] !== "hermes") command.push(agentIds[i])
       }
     }
     return command
   }
 
   function runUpdate(kind, agentIds) {
-    if (updateProcess.running || hermesProcess.running || antigravityProcess.running
+    if (updateProcess.running || hermesProcess.running
         || modelHistoryProcess.running || root.modelHistoryRequested || root.primaryLaunchInProgress) {
       // Collapse queued requests to one full rerun; a forced refresh outranks
       // the cheaper kinds it might have been queued behind.
@@ -305,7 +277,7 @@ Item {
       return
     }
     // The model-history collector is a second phase of every refresh, even if
-    // all three primary collectors are disabled for this installation.
+    // both primary collectors are disabled for this installation.
     root.modelHistoryRequested = true
     root.primaryLaunchInProgress = true
     if (updateWanted(agentIds)) {
@@ -315,10 +287,6 @@ Item {
     if (hermesWanted(agentIds)) {
       hermesProcess.command = hermesCommand(kind)
       hermesProcess.running = true
-    }
-    if (antigravityWanted(agentIds)) {
-      antigravityProcess.command = antigravityCommand(kind)
-      antigravityProcess.running = true
     }
     root.primaryLaunchInProgress = false
     Qt.callLater(root.checkPendingUpdate)
@@ -348,6 +316,7 @@ Item {
       var record = agents[i] ? agents[i].record : null
       if (!record || !record.id) continue
       var id = String(record.id)
+      if (root.isRetiredProviderId(id)) continue
       localIds[id] = true
       if (!providerEnabled(id)) continue
       var display = displayProvider(record)
@@ -358,7 +327,7 @@ Item {
     // are per-account and never travel.
     var syncedProviders = syncConfigured() && aggregateData && aggregateData.providers ? aggregateData.providers : {}
     for (var syncedId in syncedProviders) {
-      if (localIds[syncedId] || !providerEnabled(syncedId)) continue
+      if (localIds[syncedId] || root.isRetiredProviderId(syncedId) || !providerEnabled(syncedId)) continue
       var stats = syncedProviders[syncedId] || {}
       var syncedDisplay = displayProvider({ id: syncedId, name: stats.providerName || friendlyProviderDisplayName(syncedId) })
       if (providerHasData(syncedDisplay)) result.push(syncedDisplay)
@@ -367,6 +336,7 @@ Item {
   }
 
   function providerEnabled(id) {
+    if (root.isRetiredProviderId(id)) return false
     if (!settings || !settings.providers || !settings.providers[id]) return true
     return settings.providers[id].enabled !== false
   }
@@ -404,7 +374,6 @@ Item {
     if (key === "fireworks") return "Fireworks"
     if (key === "hermes") return "Hermes"
     if (key === "grok" || key === "xai") return "Grok"
-    if (key === "antigravity") return "Antigravity"
     if (key === "openai-codex") return "OpenAI Codex"
     if (key === "opencode-go") return "OpenCode Go"
     if (key === "openrouter") return "OpenRouter"
@@ -901,8 +870,9 @@ Item {
       devices[device] = true
       var snapshotProviders = snapshot.providers || {}
       for (var providerId in snapshotProviders) {
+        if (root.isRetiredProviderId(providerId)) continue
         var stats = snapshotProviders[providerId] || {}
-        var acc = providerAcc(String(providerId))
+        var acc = providerAcc(providerId)
         acc.devices[device] = true
         if (stats.providerName && acc.providerName === "") acc.providerName = String(stats.providerName)
         acc.ready = acc.ready || stats.ready === true

@@ -156,7 +156,6 @@ _KNOWN_PROVIDER_ALIASES: dict[str, tuple[str, str]] = {
     "grok": ("xai", "Grok"),
     "google": ("google", "Google Gemini"),
     "gemini": ("google", "Google Gemini"),
-    "antigravity": ("antigravity", "Antigravity"),
     "openrouter": ("openrouter", "OpenRouter"),
     "nous": ("nous", "Nous"),
     "openai": ("openai", "OpenAI"),

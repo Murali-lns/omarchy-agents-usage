@@ -321,9 +321,6 @@ Panel {
 
   function modelUsageSourceFor(p) {
     if (!p) return null
-    // Antigravity's fallback exposes quota/credit status only. Those fields are
-    // never read here; a future native collector may supply the same standard
-    // modelUsage/modelUsageByPeriod token fields as every other provider.
     if (p.providerId === "hermes" && root.selectedHermesRoute) return root.selectedHermesRoute
     return p
   }
@@ -385,30 +382,8 @@ Panel {
     return modelPeriodValues(modelUsageSourceFor(p), root.selectedModelPeriodId) !== null
   }
 
-  function modelMapHasTokens(values) {
-    if (!isPlainObject(values)) return false
-    for (var modelId in values) {
-      if (modelUsageValueTotal(values[modelId]) > 0) return true
-    }
-    return false
-  }
-
-  function modelTokenSourceHasData(p) {
-    var source = modelUsageSourceFor(p)
-    if (!source) return false
-    if (modelMapHasTokens(source.modelUsage) || modelMapHasTokens(source.todayTokensByModel)) return true
-    var periods = source.modelUsageByPeriod
-    if (!isPlainObject(periods)) return false
-    for (var period in periods) {
-      if (isModelUsagePeriod(period) && modelMapHasTokens(periods[period])) return true
-    }
-    return false
-  }
-
   function modelUnavailableText(p) {
     if (!p) return ""
-    if (p.providerId === "antigravity" && !modelTokenSourceHasData(p))
-      return "Model token history unavailable: the documented Antigravity CLI provides quota/credit status, not historical model-token usage."
     if (!modelSourceAvailable(p))
       return "Per-model token source unavailable for " + modelPeriodLabel(root.selectedModelPeriodId) + "."
     if (root.models.length === 0)
@@ -495,7 +470,7 @@ Panel {
 
   // Nothing to report, nothing in the bar: Bar.qml collapses a slot whose item
   // is invisible, so the icon appears the moment the first scan finds usage and
-  // stays away entirely on a machine that has never run either CLI.
+  // stays away entirely on a machine that has never produced a usage record.
   visible: providers.length > 0
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight

@@ -1,21 +1,21 @@
 # AI Agents Usage for Omarchy
 
-A native Omarchy bar widget and panel for local usage, limits, pace, recent history, and model statistics from available Claude Code, Codex, Fireworks, Hermes, Grok, and Antigravity records.
+A native Omarchy bar widget and panel for local usage, limits, pace, recent history, and model statistics from available Claude Code, Codex, Fireworks, Hermes, and Grok records.
 
 ## What it does
 
-- Shows available local AI-agent usage records in one bar widget for Claude Code, Codex, Fireworks, Hermes, Grok, and Antigravity.
-- Grok and Antigravity provider slots are enabled by default. The plugin includes a guarded Antigravity fallback that uses the official CLI's documented `/usage` and `/credits` views when available; it automatically defers to a native Omarchy collector if one is installed.
+- Shows available local AI-agent usage records in one bar widget for Claude Code, Codex, Fireworks, Hermes, and Grok.
+- Claude Code, Codex, Fireworks, Hermes, and Grok provider slots are enabled by default; other providers can appear through standard records and Hermes route discovery.
 - Displays limits, today’s prompts and sessions, seven-day history, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**.
 - Normalizes provider limit records to show only windows actually supplied by upstream providers (session/5-hour, weekly, monthly, reset times, used/limit/remaining, and plan labels).
 - Shows a truthful "Limit unavailable / usage-only" status when a provider lacks a safe official quota source, preserving local usage metrics without fabricating quotas.
 - Collects Hermes TUI usage from the local `~/.hermes/state.db` database in read-only mode.
-- Automatically discovers Hermes provider/subscription routes from recorded models and usage, grouping all models and metrics under safe canonical provider routes (such as OpenAI Codex, OpenCode Go, Grok, Google Gemini, Anthropic, Antigravity, OpenRouter, and Nous).
+- Automatically discovers Hermes provider/subscription routes from recorded models and usage, grouping all models and metrics under safe canonical provider routes (such as OpenAI Codex, OpenCode Go, Grok, Google Gemini, Anthropic, OpenRouter, and Nous).
 - Keeps Hermes API transport modes (e.g., chat_completions, codex_responses, anthropic_messages) aggregated under their respective provider routes without splitting subscriptions.
 - Never infers subscriptions from model names alone (for example, grok-4.6 routed through OpenCode Go remains OpenCode Go).
 - Writes Hermes’ display record to the user’s local `~/.local/state/omarchy/agents/usage/hermes.json`.
 - The Hermes collector never reads or sends prompt text, message content, API keys, or credentials, and does not use a network connection.
-- Claude Code, Codex, and Fireworks records are collected through Omarchy’s existing provider tools. Antigravity's fallback invokes only the installed `agy` CLI and stores validated quota/credit fields locally; it does not read credentials, conversation databases, prompts, or message content.
+- Claude Code, Codex, Fireworks, and Grok records are collected through Omarchy’s existing provider tools.
 - Optional cross-device aggregation is off by default and is enabled only through the user’s explicit widget settings.
 
 The plugin runs with the user’s normal desktop permissions inside the Omarchy shell. Review the source before enabling it, as with every third-party Omarchy plugin.
@@ -36,20 +36,7 @@ The **TOKENS BY MODEL** section defaults to **Today** and offers four local-cale
 - Hermes publishes exact per-model period totals directly from its read-only usage tables.
 - Older/native provider records that expose only current-day and cumulative model totals are tracked by the local hidden `~/.local/state/omarchy/agents/usage/.model-history.json` sidecar. It reads standard usage records only, keeps at most 31 daily buckets, and begins 7-day/month coverage at the first safe observation; it never assigns historical all-time totals to the first day.
 - The sidecar is local-only, mode `0600`, atomic, and contains only bounded provider/model token aggregates. It never reads transcripts, prompts, conversations, databases, credentials, or endpoints. Native provider records remain authoritative whenever they publish a period.
-- Antigravity’s documented CLI currently publishes model quota/credit status, not historical model-token usage. The plugin keeps those values in **LIMITS** and shows model-token history as unavailable; it never relabels quota percentages as tokens. A future native Antigravity record using the standard token fields will work automatically.
-
-## Antigravity fallback collector
-
-The bundled fallback runs only when the native Omarchy collector is absent. It invokes the installed Antigravity CLI's documented quota views (`/usage` and `/credits`) through non-interactive print mode, then writes the standard local record at `~/.local/state/omarchy/agents/usage/antigravity.json`.
-
-- Antigravity authentication remains inside `agy` and its normal system-keyring/browser flow; the adapter never reads or receives credentials.
-- Only validated model/window labels, remaining percentages, reset timestamps, and AI-credit counts are kept. No total allowance is invented when the CLI does not provide one.
-- The adapter does not collect prompt history, session counts, token totals, or conversation content because the official quota views do not expose those as a safe usage record.
-- A normal refresh reuses an adapter record for two minutes to avoid repeated quota requests; an explicit widget refresh (`omarchy-shell io.github.murali-lns.agents-usage refresh`) bypasses that cache.
-- If the output changes or the CLI is unavailable, the adapter fails closed and reports the limit as unavailable rather than parsing arbitrary text.
-- If Omarchy later installs `omarchy-agent-usage-antigravity`, the fallback becomes a no-op and the native collector owns `antigravity.json`; no duplicate collector or record is created.
-
-The official command references are [Model Quotas](https://antigravity.google/docs/cli/commands/usage) and [AI Credits](https://antigravity.google/docs/cli/credits) in the [Antigravity CLI documentation](https://antigravity.google/docs/cli/).
+- Providers that do not publish model-token history show a generic unavailable message; quota and credit fields are never relabeled as token usage.
 
 ## Interface example
 
@@ -61,8 +48,7 @@ The panel combines provider tabs, a seven-day token history, and a model-level t
 
 - Omarchy Quattro with the Omarchy shell running.
 - Python 3 for Hermes collection.
-- Omarchy’s built-in agent usage tools for the Claude Code, Codex, and Fireworks records.
-- Antigravity CLI (`agy`) is needed for the bundled fallback; it is optional if Omarchy’s native collector is installed instead.
+- Omarchy’s built-in agent usage tools for the Claude Code, Codex, Fireworks, and Grok records.
 - A Hermes installation and local `~/.hermes/state.db` are needed for Hermes statistics; the widget remains usable without Hermes.
 
 ## Install
