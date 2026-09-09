@@ -33,7 +33,7 @@ The panel combines provider tabs, a seven-day token history, and a model-level t
 omarchy plugin add https://github.com/Murali-lns/omarchy-agents-usage.git --enable
 ```
 
-The standard Omarchy plugin command clones and validates the repository. It does not require `sudo` and this repository has no install hook.
+The standard Omarchy plugin command clones and validates the repository. It runs with ordinary user permissions and this repository has no install hook.
 
 ## Remove
 
