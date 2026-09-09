@@ -14,6 +14,12 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 
 The plugin runs with the user’s normal desktop permissions inside the Omarchy shell. Review the source before enabling it, as with every third-party Omarchy plugin.
 
+## Interface example
+
+The panel combines provider tabs, a seven-day token history, and a model-level token breakdown. The values shown below are real local usage statistics from the captured demo machine; every installation displays its own local records.
+
+![AI Agents Usage panel showing provider tabs, token history, and model usage](assets/hermes-usage-panel.png)
+
 ## Requirements
 
 - Omarchy Quattro with the Omarchy shell running.
