@@ -382,12 +382,32 @@ Panel {
   }
 
   function modelSourceAvailable(p) {
-    return !!modelPeriodValues(modelUsageSourceFor(p), root.selectedModelPeriodId)
+    return modelPeriodValues(modelUsageSourceFor(p), root.selectedModelPeriodId) !== null
+  }
+
+  function modelMapHasTokens(values) {
+    if (!isPlainObject(values)) return false
+    for (var modelId in values) {
+      if (modelUsageValueTotal(values[modelId]) > 0) return true
+    }
+    return false
+  }
+
+  function modelTokenSourceHasData(p) {
+    var source = modelUsageSourceFor(p)
+    if (!source) return false
+    if (modelMapHasTokens(source.modelUsage) || modelMapHasTokens(source.todayTokensByModel)) return true
+    var periods = source.modelUsageByPeriod
+    if (!isPlainObject(periods)) return false
+    for (var period in periods) {
+      if (isModelUsagePeriod(period) && modelMapHasTokens(periods[period])) return true
+    }
+    return false
   }
 
   function modelUnavailableText(p) {
     if (!p) return ""
-    if (p.providerId === "antigravity" && !modelSourceAvailable(p))
+    if (p.providerId === "antigravity" && !modelTokenSourceHasData(p))
       return "Model token history unavailable: the documented Antigravity CLI provides quota/credit status, not historical model-token usage."
     if (!modelSourceAvailable(p))
       return "Per-model token source unavailable for " + modelPeriodLabel(root.selectedModelPeriodId) + "."

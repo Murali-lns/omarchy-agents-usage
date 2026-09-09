@@ -82,6 +82,8 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn('providerId === "hermes"', source)
         self.assertIn("modelUsage/modelUsageByPeriod", source)
         self.assertIn("quota/credit status", source)
+        self.assertIn("modelTokenSourceHasData", self.panel)
+        self.assertIn('providerId === "antigravity" && !modelTokenSourceHasData(p)', self.panel)
         self.assertIn("Per-model token source unavailable", self.panel)
 
     def test_period_data_propagates_and_hermes_routes_use_provider_route_keys(self):
