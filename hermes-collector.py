@@ -54,35 +54,35 @@ def recent_date_strings(today_dt: datetime) -> list[str]:
 # route label, route id, secret fragment, or endpoint-like string.
 _ROUTE_TOKEN_RE = re.compile(r"[a-z0-9]+(?:[_-][a-z0-9]+)*\Z")
 _MAX_ROUTE_TOKEN_LENGTH = 64
-_KNOWN_PROVIDER_LABELS = {
-    "openai": "OpenAI",
-    "anthropic": "Anthropic",
-    "openrouter": "OpenRouter",
-    "deepseek": "DeepSeek",
-    "together": "Together",
-    "together_ai": "Together AI",
-    "togetherai": "Together AI",
-    "together-ai": "Together AI",
-    "fireworks": "Fireworks",
-    "groq": "Groq",
-    "google": "Google",
-    "hermes": "Hermes",
-    "ollama": "Ollama",
-    "xai": "xAI",
-    "aws": "AWS",
-    "azure": "Azure",
-    "github": "GitHub",
-}
-_KNOWN_MODE_LABELS = {
-    "subscription": "Subscription",
-    "api_key": "API Key",
-    "api-key": "API Key",
-    "apikey": "API Key",
-    "oauth": "OAuth",
-    "managed": "Managed",
-    "free": "Free",
-    "local": "Local",
-    "credits": "Credits",
+
+_KNOWN_PROVIDER_ALIASES: dict[str, tuple[str, str]] = {
+    # alias -> (canonical_id, canonical_label)
+    "openai-codex": ("openai-codex", "OpenAI Codex"),
+    "codex": ("openai-codex", "OpenAI Codex"),
+    "opencode-go": ("opencode-go", "OpenCode Go"),
+    "opencode": ("opencode-go", "OpenCode Go"),
+    "anthropic": ("anthropic", "Anthropic"),
+    "claude": ("anthropic", "Anthropic"),
+    "xai": ("xai", "Grok"),
+    "grok": ("xai", "Grok"),
+    "google": ("google", "Google Gemini"),
+    "gemini": ("google", "Google Gemini"),
+    "antigravity": ("antigravity", "Antigravity"),
+    "openrouter": ("openrouter", "OpenRouter"),
+    "nous": ("nous", "Nous"),
+    "openai": ("openai", "OpenAI"),
+    "deepseek": ("deepseek", "DeepSeek"),
+    "together": ("together", "Together AI"),
+    "together_ai": ("together", "Together AI"),
+    "togetherai": ("together", "Together AI"),
+    "together-ai": ("together", "Together AI"),
+    "fireworks": ("fireworks", "Fireworks"),
+    "groq": ("groq", "Groq"),
+    "hermes": ("hermes", "Hermes"),
+    "ollama": ("ollama", "Ollama"),
+    "aws": ("aws", "AWS"),
+    "azure": ("azure", "Azure"),
+    "github": ("github", "GitHub"),
 }
 
 
@@ -99,37 +99,63 @@ def _safe_route_token(raw_value: Any) -> str:
 def friendly_provider_name(provider: str) -> str:
     """Return a fixed label for a known provider; never title-case unknown text."""
     value = _safe_route_token(provider)
-    return _KNOWN_PROVIDER_LABELS.get(value, "Unattributed")
+    if value in _KNOWN_PROVIDER_ALIASES:
+        return _KNOWN_PROVIDER_ALIASES[value][1]
+    return "Unattributed"
 
 
 def friendly_mode_name(mode: str) -> str:
-    """Return a fixed label for a known billing mode or Unattributed."""
+    """Return sanitized mode token or empty string."""
     if mode is None or (isinstance(mode, str) and mode.strip() == ""):
         return ""
-    value = _safe_route_token(mode)
-    return _KNOWN_MODE_LABELS.get(value, "Unattributed")
+    return _safe_route_token(mode)
+
+
+_KNOWN_SAFE_MODES = {
+    "chat_completions",
+    "codex_responses",
+    "anthropic_messages",
+    "messages",
+    "completions",
+    "responses",
+    "subscription",
+    "api_key",
+    "api-key",
+    "apikey",
+    "oauth",
+    "managed",
+    "free",
+    "local",
+    "credits",
+}
 
 
 def normalize_route_info(raw_provider: Any, raw_mode: Any) -> tuple[str, str, str, str]:
-    """Normalize only known route attribution; collapse everything else safely."""
+    """Normalize a safe provider route and optionally retain a known-safe mode.
+
+    Returns (canonical_route_id, canonical_route_label, canonical_provider, safe_mode).
+    An unknown, missing, malformed, URL-like, or secret-like provider collapses to
+    ('unattributed', 'Unattributed', '', ''). A missing or unfamiliar transport
+    mode does *not* erase a valid provider: it is omitted from the display record.
+    Routes are grouped strictly by provider (never split by API transport mode).
+    """
     provider = _safe_route_token(raw_provider)
-    mode = _safe_route_token(raw_mode)
     mode_missing = raw_mode is None or (isinstance(raw_mode, str) and raw_mode.strip() == "")
 
-    # The provider must be known before it is emitted. A missing mode preserves
-    # the historical provider-only route; any present unknown, URL-like,
-    # token-like, overlong, or malformed mode collapses the whole route.
-    if provider not in _KNOWN_PROVIDER_LABELS:
+    if provider not in _KNOWN_PROVIDER_ALIASES:
         return "unattributed", "Unattributed", "", ""
 
-    provider_label = _KNOWN_PROVIDER_LABELS[provider]
+    canonical_id, canonical_label = _KNOWN_PROVIDER_ALIASES[provider]
+
     if mode_missing:
-        return provider, provider_label, provider, ""
-    if mode not in _KNOWN_MODE_LABELS:
-        return "unattributed", "Unattributed", "", ""
+        return canonical_id, canonical_label, canonical_id, ""
 
-    mode_label = _KNOWN_MODE_LABELS[mode]
-    return f"{provider}:{mode}", f"{provider_label} ({mode_label})", provider, mode
+    # billing_mode is transport metadata, not subscription identity. Keep only
+    # modes from the safe, known vocabulary; future/unknown modes must not make
+    # an otherwise valid provider route disappear or leak arbitrary text.
+    mode = _safe_route_token(raw_mode)
+    safe_mode = mode if mode in _KNOWN_SAFE_MODES else ""
+    return canonical_id, canonical_label, canonical_id, safe_mode
 
 
 def empty_route(
@@ -335,6 +361,7 @@ def collect_usage() -> dict[str, Any]:
                     "isAll": False,
                     "billingProvider": clean_prov,
                     "billingMode": clean_mode,
+                    "modes": set([clean_mode]) if clean_mode else set(),
                     "sessions": set(),
                     "today_sessions": set(),
                     "total_prompts": 0,
@@ -347,6 +374,8 @@ def collect_usage() -> dict[str, Any]:
                     "today_tokens_by_model": {},
                 }
             r_acc = route_accs[r_id]
+            if clean_mode:
+                r_acc["modes"].add(clean_mode)
             r_acc["sessions"].add(sess_id)
             r_acc["total_prompts"] += api_calls
             r_acc["total_tokens"] += tot_tok
@@ -429,12 +458,13 @@ def collect_usage() -> dict[str, Any]:
                 if r_acc["today_tokens_by_model"][m] > 0
             }
             r_active_dates = sorted(r_acc["active_dates"])
+            billing_mode = next(iter(r_acc.get("modes", set()))) if len(r_acc.get("modes", set())) == 1 else ""
             individual_routes.append({
                 "id": r_acc["id"],
                 "label": r_acc["label"],
                 "isAll": False,
                 "billingProvider": r_acc["billingProvider"],
-                "billingMode": r_acc["billingMode"],
+                "billingMode": billing_mode,
                 "tokens": r_acc["total_tokens"],
                 "totalTokens": r_acc["total_tokens"],
                 "todayTotalTokens": r_acc["today_tokens"],

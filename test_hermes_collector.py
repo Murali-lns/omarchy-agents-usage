@@ -205,8 +205,8 @@ class TestHermesCollector(unittest.TestCase):
 
         routes = {r["id"]: r for r in record["routes"]}
         self.assertIn("all", routes)
-        self.assertIn("anthropic:subscription", routes)
-        self.assertIn("openai:api_key", routes)
+        self.assertIn("anthropic", routes)
+        self.assertIn("openai", routes)
         self.assertIn("unattributed", routes)
 
         # 1. All subscriptions aggregate
@@ -218,10 +218,9 @@ class TestHermesCollector(unittest.TestCase):
         self.assertEqual(all_r["activeDays"], 1)
 
         # 2. Anthropic subscription route
-        ant_r = routes["anthropic:subscription"]
-        self.assertEqual(ant_r["label"], "Anthropic (Subscription)")
+        ant_r = routes["anthropic"]
+        self.assertEqual(ant_r["label"], "Anthropic")
         self.assertEqual(ant_r["billingProvider"], "anthropic")
-        self.assertEqual(ant_r["billingMode"], "subscription")
         self.assertEqual(ant_r["tokens"], 450)  # (100+50) + (200+100)
         self.assertEqual(ant_r["apiCallCount"], 5)  # 2 + 3
         self.assertEqual(ant_r["sessions"], 2)  # s1 and s2
@@ -229,10 +228,9 @@ class TestHermesCollector(unittest.TestCase):
         self.assertEqual(ant_r["modelUsage"]["claude-3-5-sonnet"]["inputTokens"], 300)
 
         # 3. OpenAI API key route
-        oai_r = routes["openai:api_key"]
-        self.assertEqual(oai_r["label"], "OpenAI (API Key)")
+        oai_r = routes["openai"]
+        self.assertEqual(oai_r["label"], "OpenAI")
         self.assertEqual(oai_r["billingProvider"], "openai")
-        self.assertEqual(oai_r["billingMode"], "api_key")
         self.assertEqual(oai_r["tokens"], 500)  # 300 + 200
         self.assertEqual(oai_r["apiCallCount"], 4)
         self.assertEqual(oai_r["sessions"], 1)  # s2
@@ -346,16 +344,16 @@ class TestHermesCollector(unittest.TestCase):
         self.assertEqual(routes["all"]["activeDays"], 3)
 
         # Anthropic should have 2 active days
-        self.assertEqual(routes["anthropic:subscription"]["activeDays"], 2)
+        self.assertEqual(routes["anthropic"]["activeDays"], 2)
 
         # OpenAI should have 1 active day
-        self.assertEqual(routes["openai:api_key"]["activeDays"], 1)
+        self.assertEqual(routes["openai"]["activeDays"], 1)
 
         # Check recentDays mapping for route B on three days ago
         d_str = three_days_ago_dt.strftime("%Y-%m-%d")
-        recent_b = {d["date"]: d["messageCount"] for d in routes["openai:api_key"]["recentDays"]}
+        recent_b = {d["date"]: d["messageCount"] for d in routes["openai"]["recentDays"]}
         self.assertEqual(recent_b.get(d_str), 300)
-        recent_a = {d["date"]: d["messageCount"] for d in routes["anthropic:subscription"]["recentDays"]}
+        recent_a = {d["date"]: d["messageCount"] for d in routes["anthropic"]["recentDays"]}
         self.assertEqual(recent_a.get(d_str), 0)
 
     def test_deterministic_order_and_attribution_sanitization(self):
@@ -401,16 +399,16 @@ class TestHermesCollector(unittest.TestCase):
 
         # 'all' must be first
         self.assertEqual(route_ids[0], "all")
-        # 'together_ai:credits' and 'openai:api_key' should come before 'unattributed'
+        # 'together' and 'openai' should come before 'unattributed'
         self.assertEqual(route_ids[-1], "unattributed")
-        self.assertIn("openai:api_key", route_ids)
-        self.assertIn("together_ai:credits", route_ids)
+        self.assertIn("openai", route_ids)
+        self.assertIn("together", route_ids)
 
         # Labels
-        openai_r = next(r for r in routes if r["id"] == "openai:api_key")
-        self.assertEqual(openai_r["label"], "OpenAI (API Key)")
-        together_r = next(r for r in routes if r["id"] == "together_ai:credits")
-        self.assertEqual(together_r["label"], "Together AI (Credits)")
+        openai_r = next(r for r in routes if r["id"] == "openai")
+        self.assertEqual(openai_r["label"], "OpenAI")
+        together_r = next(r for r in routes if r["id"] == "together")
+        self.assertEqual(together_r["label"], "Together AI")
 
         # The blank and untrusted providers should both collapse into 'unattributed'
         unatt_r = next(r for r in routes if r["id"] == "unattributed")
@@ -419,30 +417,351 @@ class TestHermesCollector(unittest.TestCase):
         self.assertEqual(unatt_r["tokens"], 140)
         self.assertEqual(unatt_r["apiCallCount"], 2)
 
-    def test_route_attribution_allowlist_collapses_unknown_values(self):
-        """Only known provider/mode labels may appear in a route attribution."""
+    def test_route_attribution_allowlist_and_mode_omission(self):
+        """Only known provider labels are emitted; unsafe modes are omitted without hiding the provider."""
         known = self.collector.normalize_route_info("OpenAI", "API_KEY")
-        self.assertEqual(known, ("openai:api_key", "OpenAI (API Key)", "openai", "api_key"))
+        self.assertEqual(known, ("openai", "OpenAI", "openai", "api_key"))
         provider_only = self.collector.normalize_route_info("OpenAI", None)
         self.assertEqual(provider_only, ("openai", "OpenAI", "openai", ""))
 
-        unsafe_values = [
+        unsafe_providers = [
             ("Acme Cloud", "subscription"),
-            ("openai", "mystery_mode"),
+            ("openai\nsecret", "subscription"),
             ("[NOT_EMITTED_ENDPOINT]", "subscription"),
             ("[REDACTED_VALUE]", "api_key"),
             ("x" * 65, "subscription"),
-            ("openai", "[NOT_EMITTED_ENDPOINT]"),
-            ("openai", "[REDACTED_VALUE]"),
-            ("openai", "api key"),
-            ("openai\nsecret", "subscription"),
         ]
-        for raw_provider, raw_mode in unsafe_values:
+        for raw_provider, raw_mode in unsafe_providers:
             with self.subTest(raw_provider=raw_provider, raw_mode=raw_mode):
                 self.assertEqual(
                     self.collector.normalize_route_info(raw_provider, raw_mode),
                     ("unattributed", "Unattributed", "", ""),
                 )
+
+        unsafe_modes = ["[NOT_EMITTED_ENDPOINT]", "[REDACTED_VALUE]", "api key"]
+        for raw_mode in unsafe_modes:
+            with self.subTest(raw_mode=raw_mode):
+                self.assertEqual(
+                    self.collector.normalize_route_info("openai", raw_mode),
+                    ("openai", "OpenAI", "openai", ""),
+                )
+
+    def test_provider_alias_discovery_and_grouping(self):
+        """Provider aliases must discover canonical routes and group across aliases."""
+        now_ts = time.time()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE session_model_usage (
+                session_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                first_seen REAL,
+                billing_provider TEXT,
+                billing_mode TEXT
+            )
+        """)
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'tui', ?)", (now_ts,))
+        conn.execute("""
+            INSERT INTO session_model_usage VALUES
+            ('s1', 'm1', 1, 100, 0, 0, 0, ?, 'openai-codex', 'codex_responses'),
+            ('s1', 'm2', 2, 200, 0, 0, 0, ?, 'codex', 'chat_completions'),
+            ('s1', 'm3', 3, 300, 0, 0, 0, ?, 'opencode-go', 'chat_completions'),
+            ('s1', 'm4', 4, 400, 0, 0, 0, ?, 'opencode', 'chat_completions'),
+            ('s1', 'm5', 5, 500, 0, 0, 0, ?, 'xai', 'chat_completions'),
+            ('s1', 'm6', 6, 600, 0, 0, 0, ?, 'grok', 'chat_completions'),
+            ('s1', 'm7', 7, 700, 0, 0, 0, ?, 'google', 'chat_completions'),
+            ('s1', 'm8', 8, 800, 0, 0, 0, ?, 'gemini', 'chat_completions'),
+            ('s1', 'm9', 9, 900, 0, 0, 0, ?, 'claude', 'anthropic_messages'),
+            ('s1', 'm10', 10, 1000, 0, 0, 0, ?, 'anthropic', 'anthropic_messages'),
+            ('s1', 'm11', 11, 1100, 0, 0, 0, ?, 'antigravity', 'chat_completions')
+        """, (now_ts,) * 11)
+        conn.commit()
+        conn.close()
+
+        record = self.collector.collect_usage()
+        routes = {r["id"]: r for r in record["routes"]}
+
+        # openai-codex and codex must be merged into openai-codex
+        self.assertIn("openai-codex", routes)
+        self.assertEqual(routes["openai-codex"]["label"], "OpenAI Codex")
+        self.assertEqual(routes["openai-codex"]["tokens"], 300)
+        self.assertEqual(routes["openai-codex"]["apiCallCount"], 3)
+
+        # opencode-go and opencode must be merged into opencode-go
+        self.assertIn("opencode-go", routes)
+        self.assertEqual(routes["opencode-go"]["label"], "OpenCode Go")
+        self.assertEqual(routes["opencode-go"]["tokens"], 700)
+        self.assertEqual(routes["opencode-go"]["apiCallCount"], 7)
+
+        # xai and grok must be merged into xai with label Grok
+        self.assertIn("xai", routes)
+        self.assertEqual(routes["xai"]["label"], "Grok")
+        self.assertEqual(routes["xai"]["tokens"], 1100)
+        self.assertEqual(routes["xai"]["apiCallCount"], 11)
+
+        # google and gemini must be merged into google with label Google Gemini
+        self.assertIn("google", routes)
+        self.assertEqual(routes["google"]["label"], "Google Gemini")
+        self.assertEqual(routes["google"]["tokens"], 1500)
+        self.assertEqual(routes["google"]["apiCallCount"], 15)
+
+        # claude and anthropic must be merged into anthropic with label Anthropic
+        self.assertIn("anthropic", routes)
+        self.assertEqual(routes["anthropic"]["label"], "Anthropic")
+        self.assertEqual(routes["anthropic"]["tokens"], 1900)
+        self.assertEqual(routes["anthropic"]["apiCallCount"], 19)
+
+        # antigravity
+        self.assertIn("antigravity", routes)
+        self.assertEqual(routes["antigravity"]["label"], "Antigravity")
+        self.assertEqual(routes["antigravity"]["tokens"], 1100)
+        self.assertEqual(routes["antigravity"]["apiCallCount"], 11)
+
+    def test_same_provider_different_api_mode_aggregation(self):
+        """Different billing_mode transport values for the same provider must aggregate into one route."""
+        now_ts = time.time()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE session_model_usage (
+                session_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                first_seen REAL,
+                billing_provider TEXT,
+                billing_mode TEXT
+            )
+        """)
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'tui', ?)", (now_ts,))
+        # openai-codex used with codex_responses, chat_completions, and missing mode
+        conn.execute("""
+            INSERT INTO session_model_usage VALUES
+            ('s1', 'codex-model', 2, 200, 100, 0, 0, ?, 'openai-codex', 'codex_responses'),
+            ('s1', 'chat-model', 3, 300, 150, 0, 0, ?, 'openai-codex', 'chat_completions'),
+            ('s1', 'bare-model', 1, 100, 50, 0, 0, ?, 'openai-codex', NULL)
+        """, (now_ts, now_ts, now_ts))
+        conn.commit()
+        conn.close()
+
+        record = self.collector.collect_usage()
+        routes = [r for r in record["routes"] if not r.get("isAll")]
+
+        # There must be only ONE route for openai-codex, not 3 split by mode
+        self.assertEqual(len(routes), 1)
+        codex_route = routes[0]
+        self.assertEqual(codex_route["id"], "openai-codex")
+        self.assertEqual(codex_route["label"], "OpenAI Codex")
+        self.assertEqual(codex_route["tokens"], 900)  # (200+100) + (300+150) + (100+50)
+        self.assertEqual(codex_route["apiCallCount"], 6)  # 2 + 3 + 1
+        self.assertEqual(codex_route["sessions"], 1)
+        self.assertIn("codex-model", codex_route["modelUsage"])
+        self.assertIn("chat-model", codex_route["modelUsage"])
+        self.assertIn("bare-model", codex_route["modelUsage"])
+
+    def test_new_transport_mode_does_not_hide_known_provider(self):
+        """A new transport mode must not erase a safe provider subscription route."""
+        route = self.collector.normalize_route_info("openai-codex", "future_responses_transport")
+        self.assertEqual(route, ("openai-codex", "OpenAI Codex", "openai-codex", ""))
+
+    def test_opencode_go_and_openai_codex_recognition(self):
+        """Observed provider identifiers opencode-go and openai-codex, plus openrouter and nous, must be recognized."""
+        now_ts = time.time()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE session_model_usage (
+                session_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                first_seen REAL,
+                billing_provider TEXT,
+                billing_mode TEXT
+            )
+        """)
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'tui', ?)", (now_ts,))
+        conn.execute("""
+            INSERT INTO session_model_usage VALUES
+            ('s1', 'm1', 1, 10, 10, 0, 0, ?, 'opencode-go', 'chat_completions'),
+            ('s1', 'm2', 2, 20, 20, 0, 0, ?, 'openai-codex', 'codex_responses'),
+            ('s1', 'm3', 3, 30, 30, 0, 0, ?, 'openrouter', 'chat_completions'),
+            ('s1', 'm4', 4, 40, 40, 0, 0, ?, 'nous', 'chat_completions')
+        """, (now_ts, now_ts, now_ts, now_ts))
+        conn.commit()
+        conn.close()
+
+        record = self.collector.collect_usage()
+        routes = {r["id"]: r for r in record["routes"]}
+
+        self.assertIn("opencode-go", routes)
+        self.assertEqual(routes["opencode-go"]["label"], "OpenCode Go")
+
+        self.assertIn("openai-codex", routes)
+        self.assertEqual(routes["openai-codex"]["label"], "OpenAI Codex")
+
+        self.assertIn("openrouter", routes)
+        self.assertEqual(routes["openrouter"]["label"], "OpenRouter")
+
+        self.assertIn("nous", routes)
+        self.assertEqual(routes["nous"]["label"], "Nous")
+
+    def test_model_name_versus_route_distinction(self):
+        """Never infer a subscription from a model name alone (e.g. grok-4.6 through OpenCode Go remains OpenCode Go)."""
+        now_ts = time.time()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE session_model_usage (
+                session_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                first_seen REAL,
+                billing_provider TEXT,
+                billing_mode TEXT
+            )
+        """)
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'tui', ?)", (now_ts,))
+        conn.execute("""
+            INSERT INTO session_model_usage VALUES
+            ('s1', 'grok-4.6', 1, 100, 100, 0, 0, ?, 'opencode-go', 'chat_completions'),
+            ('s1', 'claude-3-7-sonnet', 1, 200, 200, 0, 0, ?, 'openrouter', 'chat_completions'),
+            ('s1', 'gpt-4o', 1, 300, 300, 0, 0, ?, '', NULL)
+        """, (now_ts, now_ts, now_ts))
+        conn.commit()
+        conn.close()
+
+        record = self.collector.collect_usage()
+        routes = {r["id"]: r for r in record["routes"]}
+
+        # grok-4.6 must NOT create a grok/xai route
+        self.assertNotIn("grok", routes)
+        self.assertNotIn("xai", routes)
+        self.assertIn("opencode-go", routes)
+        self.assertIn("grok-4.6", routes["opencode-go"]["modelUsage"])
+
+        # claude-3-7-sonnet must NOT create an anthropic/claude route
+        self.assertNotIn("claude", routes)
+        self.assertNotIn("anthropic", routes)
+        self.assertIn("openrouter", routes)
+        self.assertIn("claude-3-7-sonnet", routes["openrouter"]["modelUsage"])
+
+        # gpt-4o with blank provider must be unattributed, not openai
+        self.assertNotIn("openai", routes)
+        self.assertIn("unattributed", routes)
+        self.assertIn("gpt-4o", routes["unattributed"]["modelUsage"])
+
+    def test_unsafe_metadata_fallback(self):
+        """Keep Unattributed for unsafe providers; omit unsafe modes while retaining safe providers."""
+        unsafe_provider_cases = [
+            ("", "subscription"),
+            (None, "chat_completions"),
+            ("   ", None),
+            ("[NOT_EMITTED_ENDPOINT]", "chat_completions"),
+            ("[REDACTED_SECRET]", "chat_completions"),
+            ("Bearer [REDACTED]", "chat_completions"),
+            ("untrusted/provider/value", "chat_completions"),
+            ("provider; DROP TABLE sessions", "chat_completions"),
+            ("a" * 100, "chat_completions"),
+            ("unknown_cloud_provider", "chat_completions"),
+        ]
+        for raw_provider, raw_mode in unsafe_provider_cases:
+            with self.subTest(raw_provider=raw_provider, raw_mode=raw_mode):
+                res = self.collector.normalize_route_info(raw_provider, raw_mode)
+                self.assertEqual(res, ("unattributed", "Unattributed", "", ""))
+
+        unsafe_mode_cases = [
+            "[NOT_EMITTED_ENDPOINT]",
+            "[REDACTED_SECRET]",
+            "mode with spaces",
+            "m" * 100,
+        ]
+        for raw_mode in unsafe_mode_cases:
+            with self.subTest(raw_mode=raw_mode):
+                res = self.collector.normalize_route_info("openai-codex", raw_mode)
+                self.assertEqual(res, ("openai-codex", "OpenAI Codex", "openai-codex", ""))
+
+    def test_provider_limit_unavailable_behavior(self):
+        """Hermes usage reports truthful limits unavailable (empty limits, no fabricated numeric quotas) while preserving usage."""
+        now_ts = time.time()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE session_model_usage (
+                session_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                first_seen REAL,
+                billing_provider TEXT,
+                billing_mode TEXT
+            )
+        """)
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'tui', ?)", (now_ts,))
+        conn.execute("""
+            INSERT INTO session_model_usage VALUES
+            ('s1', 'codex-model', 5, 500, 500, 0, 0, ?, 'openai-codex', 'codex_responses')
+        """, (now_ts,))
+        conn.commit()
+        conn.close()
+
+        record = self.collector.collect_usage()
+        self.assertTrue(record["ready"])
+        # Limits must be empty - no fabricated numeric quotas
+        self.assertEqual(record["limits"], [])
+        self.assertEqual(record["tierLabel"], "")
+        # Local metrics must be preserved
+        self.assertEqual(record["totalPrompts"], 5)
+        self.assertEqual(record["totalSessions"], 1)
+        self.assertIn("routes", record)
 
     def test_sync_snapshot_source_omits_local_routes(self):
         """The QML sync serializer must not write local route data."""
@@ -454,6 +773,25 @@ class TestHermesCollector(unittest.TestCase):
         self.assertNotIn("routes", provider_snapshot)
         self.assertNotIn("subscriptions", provider_snapshot)
         self.assertIn("providerMap[String(record.id)] = providerSnapshot(record)", main_qml[end:])
+
+    def test_qml_supports_canonical_provider_labels_and_safe_limits(self):
+        """The QML adapter must render discovered route aliases and sanitize numeric windows."""
+        main_qml = (Path(__file__).parent / "Main.qml").read_text(encoding="utf-8")
+        panel_qml = (Path(__file__).parent / "Panel.qml").read_text(encoding="utf-8")
+        self.assertIn('key === "openai-codex"', main_qml)
+        self.assertIn('return "OpenAI Codex"', main_qml)
+        self.assertIn('key === "opencode-go"', main_qml)
+        self.assertIn('return "OpenCode Go"', main_qml)
+        self.assertIn("if (used !== undefined && !isFinite(used)) used = undefined", panel_qml)
+        self.assertIn("percent = clamp(percent, 0, 1)", panel_qml)
+
+    def test_manifest_advertises_requested_provider_slots(self):
+        """The UI must be ready for Grok and Antigravity records when available."""
+        manifest = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
+        providers = manifest["barWidget"]["defaults"]["providers"]
+        for provider_id in ("claude", "codex", "fireworks", "hermes", "grok", "antigravity"):
+            with self.subTest(provider_id=provider_id):
+                self.assertTrue(providers[provider_id]["enabled"])
 
 
 if __name__ == "__main__":

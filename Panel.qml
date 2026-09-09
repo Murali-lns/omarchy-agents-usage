@@ -45,7 +45,7 @@ Panel {
   }
   readonly property bool showHermesRouteBar: !!root.provider
     && root.provider.providerId === "hermes"
-    && availableHermesRoutes.length > 1
+    && availableHermesRoutes.length > 0
   readonly property var selectedHermesRoute: {
     if (!root.provider || root.provider.providerId !== "hermes" || hermesRoutes.length === 0)
       return null
@@ -82,6 +82,7 @@ Panel {
     if (providers.length === 0) return
     var wrapped = ((index % providers.length) + providers.length) % providers.length
     selectedProviderId = providers[wrapped].providerId
+    selectedHermesRouteId = "all"
   }
 
   function refreshNow() {
@@ -119,9 +120,9 @@ Panel {
 
   function windowTitle(label) {
     var text = String(label || "").toLowerCase()
-    if (text.indexOf("month") >= 0) return "Monthly"
-    if (windowIsLong(text)) return "Weekly"
-    if (text.indexOf("session") >= 0 || windowSpanMs(label) > 0) return "Session"
+    if (text.indexOf("month") >= 0 || text.indexOf("30-day") >= 0) return "Monthly"
+    if (text.indexOf("week") >= 0 || text.indexOf("7-day") >= 0 || text.indexOf("seven") >= 0) return "Weekly"
+    if (text.indexOf("session") >= 0 || text.indexOf("hour") >= 0 || text.indexOf("5h") >= 0 || windowSpanMs(label) > 0) return "Session"
     var plain = String(label || "").replace(/\s*\(.*\)\s*/, "").trim()
     return plain === "" ? "Limit" : plain
   }
@@ -130,11 +131,35 @@ Panel {
   // and that beats reading it back out of the label: a model-scoped limit is
   // titled after its model, and a name like "Opus 5 (1M context)" would parse
   // as a one-minute window.
-  function limitWindow(label, percent, resetAt, title) {
+  function limitWindow(raw) {
+    if (!raw || typeof raw !== "object") return null
+    var label = String(raw.label || "")
+    var title = String(raw.title || "")
+    var percent = Number(raw.percent)
+    var used = raw.used !== undefined && raw.used !== null ? Number(raw.used) : undefined
+    var limit = raw.limit !== undefined && raw.limit !== null ? Number(raw.limit) : undefined
+    var remaining = raw.remaining !== undefined && raw.remaining !== null ? Number(raw.remaining) : undefined
+    if (used !== undefined && !isFinite(used)) used = undefined
+    if (limit !== undefined && !isFinite(limit)) limit = undefined
+    if (remaining !== undefined && !isFinite(remaining)) remaining = undefined
+    if (!isFinite(percent) || percent < 0) {
+      if (used !== undefined && limit !== undefined && limit > 0) {
+        percent = clamp(used / limit, 0, 1)
+      } else {
+        percent = -1
+      }
+    } else {
+      percent = clamp(percent, 0, 1)
+    }
     return {
-      title: String(title || "") !== "" ? String(title) : windowTitle(label),
-      percent: Number(percent),
-      resetAt: String(resetAt || "")
+      title: title !== "" ? title : windowTitle(label),
+      percent: percent,
+      resetAt: String(raw.resetsAt || raw.resetAt || ""),
+      used: used,
+      limit: limit,
+      remaining: remaining,
+      source: String(raw.source || ""),
+      status: String(raw.status || "")
     }
   }
 
@@ -143,9 +168,10 @@ Panel {
     var out = []
     var list = p.limits || []
     for (var i = 0; i < list.length; i++) {
-      var entry = list[i] || {}
-      var percent = Number(entry.percent)
-      if (percent >= 0) out.push(limitWindow(entry.label, percent, entry.resetsAt, entry.title))
+      var entry = limitWindow(list[i])
+      if (entry && (entry.percent >= 0 || entry.used !== undefined || entry.remaining !== undefined)) {
+        out.push(entry)
+      }
     }
     return out
   }
@@ -213,11 +239,12 @@ Panel {
     if (p.providerId === "hermes" && root.selectedHermesRoute) {
       if (root.selectedHermesRoute.id !== "all" && root.selectedHermesRoute.label)
         return root.selectedHermesRoute.label
-      return "Subscription"
+      return "Usage only"
     }
     var tier = String(p.tierLabel || "")
-    if (tier === "") return "Subscription"
-    return tier.charAt(0).toUpperCase() + tier.slice(1)
+    if (tier !== "") return tier.charAt(0).toUpperCase() + tier.slice(1)
+    if ((p.limits && p.limits.length > 0) || !!p.balance) return "Subscription"
+    return "Usage only"
   }
 
   // Local calendar date, recomputed from nowMs so a panel left open across
@@ -668,7 +695,7 @@ Panel {
 
           Column {
             id: limitsSection
-            visible: root.limits.length > 0
+            visible: root.limits.length > 0 || (!!root.provider && !root.balance)
             width: parent.width
             spacing: Style.space(10)
 
@@ -686,6 +713,17 @@ Panel {
                 width: limitsSection.width
                 window: modelData
               }
+            }
+
+            Text {
+              id: limitsUnavailableText
+              visible: root.limits.length === 0
+              textFormat: Text.PlainText
+              width: parent.width
+              text: "Limit unavailable · Usage only"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
           }
 
@@ -906,9 +944,12 @@ Panel {
       Text {
         id: limitValue
         textFormat: Text.PlainText
-        text: limitRow.window && limitRow.window.percent >= 0
-          ? Math.round(limitRow.window.percent * 100) + "%"
-          : "—"
+        text: {
+          if (!limitRow.window) return "—"
+          if (limitRow.window.percent >= 0) return Math.round(limitRow.window.percent * 100) + "%"
+          if (limitRow.window.remaining !== undefined) return usage.formatTokenCount(limitRow.window.remaining) + " left"
+          return "—"
+        }
         color: limitRow.alarming ? root.urgent : root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -918,6 +959,7 @@ Panel {
     }
 
     Meter {
+      visible: limitRow.window && limitRow.window.percent >= 0
       width: parent.width
       value: limitRow.window ? limitRow.window.percent : -1
       alarming: limitRow.alarming
@@ -926,10 +968,23 @@ Panel {
     Text {
       id: resetText
       textFormat: Text.PlainText
+      visible: text !== ""
       width: parent.width
       text: {
+        var parts = []
+        if (limitRow.window && limitRow.window.used !== undefined && limitRow.window.limit !== undefined) {
+          parts.push(usage.formatTokenCount(limitRow.window.used) + " / " + usage.formatTokenCount(limitRow.window.limit) + " used")
+        } else if (limitRow.window && limitRow.window.remaining !== undefined && limitRow.window.percent >= 0) {
+          parts.push(usage.formatTokenCount(limitRow.window.remaining) + " remaining")
+        }
         var remainingMs = root.resetMsFor(limitRow.window)
-        return remainingMs > 0 ? "Resets in " + root.formatDuration(remainingMs) : ""
+        if (remainingMs > 0) {
+          parts.push("Resets in " + root.formatDuration(remainingMs))
+        }
+        if (limitRow.window && limitRow.window.status) {
+          parts.push(limitRow.window.status)
+        }
+        return parts.join(" · ")
       }
       color: root.dim
       font.family: root.fontFamily

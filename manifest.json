@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.murali-lns.agents-usage",
   "name": "AI Agents Usage",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Murali-lns",
   "license": "MIT",
-  "description": "A native Omarchy bar panel for local usage, limits, pace, and model statistics from Claude Code, Codex, Fireworks, and Hermes.",
+  "description": "A native Omarchy bar panel for local usage, limits, pace, and model statistics from Claude Code, Codex, Fireworks, Hermes, Grok, and Antigravity.",
   "kinds": [
     "bar-widget"
   ],
@@ -35,6 +35,12 @@
           "enabled": true
         },
         "hermes": {
+          "enabled": true
+        },
+        "grok": {
+          "enabled": true
+        },
+        "antigravity": {
           "enabled": true
         }
       },

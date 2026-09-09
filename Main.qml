@@ -262,7 +262,7 @@ Item {
     for (var syncedId in syncedProviders) {
       if (localIds[syncedId] || !providerEnabled(syncedId)) continue
       var stats = syncedProviders[syncedId] || {}
-      var syncedDisplay = displayProvider({ id: syncedId, name: stats.providerName || syncedId })
+      var syncedDisplay = displayProvider({ id: syncedId, name: stats.providerName || friendlyProviderDisplayName(syncedId) })
       if (providerHasData(syncedDisplay)) result.push(syncedDisplay)
     }
     return result
@@ -298,6 +298,23 @@ Item {
     }
   }
 
+  function friendlyProviderDisplayName(id) {
+    var raw = String(id || "")
+    var key = raw.toLowerCase()
+    if (key === "claude") return "Claude Code"
+    if (key === "codex") return "Codex"
+    if (key === "fireworks") return "Fireworks"
+    if (key === "hermes") return "Hermes"
+    if (key === "grok" || key === "xai") return "Grok"
+    if (key === "antigravity") return "Antigravity"
+    if (key === "openai-codex") return "OpenAI Codex"
+    if (key === "opencode-go") return "OpenCode Go"
+    if (key === "openrouter") return "OpenRouter"
+    if (key === "google" || key === "gemini") return "Google Gemini"
+    if (key === "anthropic") return "Anthropic"
+    return raw.charAt(0).toUpperCase() + raw.slice(1)
+  }
+
   function displayProvider(record) {
     var stats = syncedStatsFor(String(record.id))
     var synced = !!stats
@@ -305,7 +322,7 @@ Item {
 
     return {
       providerId: String(record.id),
-      providerName: String(record.name || record.id),
+      providerName: String(record.name || friendlyProviderDisplayName(record.id)),
       ready: record.ready === true || synced,
       usageStatusText: String(record.usageStatusText || ""),
       authHelpText: String(record.authHelpText || ""),
@@ -725,7 +742,7 @@ Item {
   function providerSnapshot(record) {
     return {
       providerId: String(record.id),
-      providerName: String(record.name || record.id),
+      providerName: String(record.name || friendlyProviderDisplayName(record.id)),
       ready: record.ready === true,
       hasLocalStats: record.hasLocalStats !== false,
       hasPromptStats: record.hasPromptStats !== false,
