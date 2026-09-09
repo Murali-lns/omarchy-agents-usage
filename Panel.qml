@@ -59,6 +59,16 @@ Panel {
     ? root.selectedHermesRoute
     : root.provider
 
+  // Default to Today so the first view matches the existing today counters;
+  // older records fall back to todayTokensByModel and All time to modelUsage.
+  readonly property var modelPeriods: [
+    { id: "today", label: "Today" },
+    { id: "7d", label: "7 days" },
+    { id: "month", label: "1 month" },
+    { id: "all", label: "All time" }
+  ]
+  property string selectedModelPeriodId: "today"
+
   property bool cursorActive: false
 
   // Countdowns and "updated" read this instead of Date.now() so the
@@ -298,35 +308,130 @@ Panel {
     return peak
   }
 
-  function modelRows(p) {
-    var usageByModel = {}
-    if (p && p.providerId === "hermes" && root.selectedHermesRoute) {
-      usageByModel = root.selectedHermesRoute.modelUsage || {}
-    } else if (p) {
-      usageByModel = p.modelUsage || {}
+  function validModelPeriod(id) {
+    return id === "today" || id === "7d" || id === "month" || id === "all"
+  }
+
+  function modelPeriodLabel(id) {
+    for (var i = 0; i < root.modelPeriods.length; i++) {
+      if (root.modelPeriods[i].id === id) return root.modelPeriods[i].label
     }
+    return "Today"
+  }
+
+  function modelUsageSourceFor(p) {
+    if (!p) return null
+    // Antigravity's fallback exposes quota/credit status only. Those fields are
+    // never read here; a future native collector may supply the same standard
+    // modelUsage/modelUsageByPeriod token fields as every other provider.
+    if (p.providerId === "hermes" && root.selectedHermesRoute) return root.selectedHermesRoute
+    return p
+  }
+
+  function modelPeriodValues(source, periodId) {
+    if (!source || !validModelPeriod(periodId)) return null
+    var byPeriod = source.modelUsageByPeriod
+    if (byPeriod && typeof byPeriod === "object" && !Array.isArray(byPeriod)
+        && byPeriod[periodId] !== undefined && byPeriod[periodId] !== null
+        && typeof byPeriod[periodId] === "object" && !Array.isArray(byPeriod[periodId])) {
+      return byPeriod[periodId]
+    }
+    // Legacy records did not have modelUsageByPeriod. Keep their Today and
+    // All time views useful without manufacturing missing 7-day/month data.
+    if (periodId === "today" && source.todayTokensByModel
+        && typeof source.todayTokensByModel === "object" && !Array.isArray(source.todayTokensByModel))
+      return source.todayTokensByModel
+    if (periodId === "all" && source.modelUsage
+        && typeof source.modelUsage === "object" && !Array.isArray(source.modelUsage))
+      return source.modelUsage
+    return null
+  }
+
+  function safeTokenNumber(value) {
+    if (typeof value !== "number" && typeof value !== "string") return 0
+    var n = Number(value)
+    return isFinite(n) && n > 0 ? n : 0
+  }
+
+  function tokenParts(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {
+        total: safeTokenNumber(value),
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        hasBreakdown: false
+      }
+    }
+    var input = safeTokenNumber(value.inputTokens)
+    var output = safeTokenNumber(value.outputTokens)
+    var cacheRead = safeTokenNumber(value.cacheReadInputTokens)
+    var cacheWrite = safeTokenNumber(value.cacheCreationInputTokens)
+    var total = input + output + cacheRead + cacheWrite
+    if (total === 0 && value.totalTokens !== undefined) total = safeTokenNumber(value.totalTokens)
+    return {
+      total: total,
+      input: input,
+      output: output,
+      cacheRead: cacheRead,
+      cacheWrite: cacheWrite,
+      hasBreakdown: value.inputTokens !== undefined || value.outputTokens !== undefined
+        || value.cacheReadInputTokens !== undefined || value.cacheCreationInputTokens !== undefined
+    }
+  }
+
+  function modelSourceAvailable(p) {
+    return !!modelPeriodValues(modelUsageSourceFor(p), root.selectedModelPeriodId)
+  }
+
+  function modelUnavailableText(p) {
+    if (!p) return ""
+    if (p.providerId === "antigravity" && !modelSourceAvailable(p))
+      return "Model token history unavailable: the documented Antigravity CLI provides quota/credit status, not historical model-token usage."
+    if (!modelSourceAvailable(p))
+      return "Per-model token source unavailable for " + modelPeriodLabel(root.selectedModelPeriodId) + "."
+    if (root.models.length === 0)
+      return "No model-token usage recorded for " + modelPeriodLabel(root.selectedModelPeriodId) + "."
+    return ""
+  }
+
+  function modelRows(p) {
+    var source = modelUsageSourceFor(p)
+    var usageByModel = modelPeriodValues(source, root.selectedModelPeriodId)
+    if (!usageByModel || typeof usageByModel !== "object" || Array.isArray(usageByModel)) return []
     var rows = []
     for (var id in usageByModel) {
-      var bucket = usageByModel[id] || {}
-      var input = Number(bucket.inputTokens || 0)
-      var output = Number(bucket.outputTokens || 0)
-      var cacheRead = Number(bucket.cacheReadInputTokens || 0)
-      var cacheWrite = Number(bucket.cacheCreationInputTokens || 0)
+      var modelId = String(id)
+      if (modelId.trim() === "") continue
+      var parts = tokenParts(usageByModel[id])
+      if (!(parts.total > 0) || !isFinite(parts.total)) continue
       rows.push({
-        name: usage.friendlyModelName(id),
-        total: input + output + cacheRead + cacheWrite,
-        input: input,
-        output: output,
-        cacheRead: cacheRead,
-        cacheWrite: cacheWrite
+        id: modelId,
+        name: usage.friendlyModelName(modelId),
+        total: parts.total,
+        input: parts.input,
+        output: parts.output,
+        cacheRead: parts.cacheRead,
+        cacheWrite: parts.cacheWrite,
+        hasBreakdown: parts.hasBreakdown
       })
     }
     rows.sort(function(a, b) { return b.total - a.total })
-    return rows.slice(0, 4)
+    return rows
+  }
+
+  function modelShare(row, rows) {
+    var total = row ? Number(row.total) : 0
+    var peak = rows && rows.length > 0 ? Number(rows[0].total) : 0
+    if (!isFinite(total) || total <= 0 || !isFinite(peak) || peak <= 0) return 0
+    return clamp(total / peak, 0, 1)
   }
 
   function modelTooltip(row) {
     if (!row) return ""
+    if (row.hasBreakdown !== true)
+      return "Total " + usage.formatTokenCount(row.total) + " tokens"
     return "In " + usage.formatTokenCount(row.input)
       + " · out " + usage.formatTokenCount(row.output)
       + " · cache read " + usage.formatTokenCount(row.cacheRead)
@@ -870,7 +975,7 @@ Panel {
 
           Column {
             id: modelSection
-            visible: root.models.length > 0
+            visible: !!root.provider
             width: parent.width
             spacing: Style.spacing.md
 
@@ -879,6 +984,35 @@ Panel {
               text: "TOKENS BY MODEL"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+
+            Flow {
+              id: modelPeriodFilter
+              width: parent.width
+              spacing: Style.spacing.sm
+
+              Repeater {
+                model: root.modelPeriods
+
+                Button {
+                  required property var modelData
+
+                  text: modelData.label
+                  selected: root.selectedModelPeriodId === String(modelData.id)
+                  hasCursor: root.cursorActive && selected
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  verticalPadding: Style.space(4)
+                  horizontalPadding: Style.space(8)
+                  onClicked: {
+                    root.cursorActive = true
+                    root.selectedModelPeriodId = String(modelData.id)
+                  }
+                  onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
+                }
+              }
             }
 
             Repeater {
@@ -890,8 +1024,20 @@ Panel {
                 row: modelData
                 // Scaled to the heaviest model, so the top row is always full —
                 // the same scale-to-peak the weekly chart uses for its busiest day.
-                share: modelData.total / Math.max(1, root.models[0].total)
+                share: root.modelShare(modelData, root.models)
               }
+            }
+
+            Text {
+              id: modelUnavailableLabel
+              visible: text !== ""
+              textFormat: Text.PlainText
+              width: parent.width
+              text: root.modelUnavailableText(root.provider)
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 

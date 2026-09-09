@@ -15,6 +15,11 @@ Item {
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string usageDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agents/usage"
+  // This hidden file is supplemental historical model data, never a provider
+  // record. Agent discovery explicitly excludes it below.
+  readonly property string modelHistoryPath: usageDir + "/.model-history.json"
+  property var modelHistoryData: ({})
+  property int modelHistoryRevision: 0
 
   // ------------------------------------------------------------- discovery
 
@@ -25,7 +30,7 @@ Item {
   Process {
     id: listProcess
     running: false
-    command: ["find", root.usageDir, "-maxdepth", "1", "-name", "*.json", "-printf", "%f\n"]
+    command: ["find", root.usageDir, "-maxdepth", "1", "-name", "*.json", "-not", "-name", ".model-history.json", "-printf", "%f\n"]
 
     stdout: StdioCollector {
       waitForEnd: true
@@ -42,6 +47,7 @@ Item {
     var lines = String(output || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
       var name = lines[i].trim()
+      if (name === ".model-history.json") continue
       if (name.slice(-5) === ".json") ids.push(name.slice(0, -5))
     }
     ids.sort()
@@ -171,6 +177,14 @@ Item {
     return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/antigravity-collector.py"
   }
 
+  readonly property string modelHistoryCollectorPath: {
+    var resolved = Qt.resolvedUrl("model-history-collector.py").toString().replace(/^file:\/\//, "")
+    if (resolved && resolved.indexOf("/") !== -1) {
+      return resolved
+    }
+    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/model-history-collector.py"
+  }
+
   Process {
     id: antigravityProcess
     running: false
@@ -185,11 +199,44 @@ Item {
     }
   }
 
+  // Model history is supplemental display data. It must run only after every
+  // authoritative provider collector has finished, otherwise it can read a
+  // half-written provider record and publish a mixed-period sidecar.
+  Process {
+    id: modelHistoryProcess
+    running: false
+    onExited: {
+      root.rescanAgents()
+      root.checkPendingUpdate()
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("agents/model-history", text.trim())
+    }
+  }
+
+  function modelHistoryCommand() {
+    return [root.modelHistoryCollectorPath]
+  }
+
+  property bool modelHistoryRequested: false
+  property bool primaryLaunchInProgress: false
+
   function checkPendingUpdate() {
-    if (!updateProcess.running && !hermesProcess.running && !antigravityProcess.running && root.pendingUpdateKind !== "") {
-      var kind = root.pendingUpdateKind
-      root.pendingUpdateKind = ""
-      root.runUpdate(kind)
+    if (!root.primaryLaunchInProgress && !updateProcess.running && !hermesProcess.running
+        && !antigravityProcess.running && !modelHistoryProcess.running) {
+      if (root.modelHistoryRequested) {
+        root.modelHistoryRequested = false
+        modelHistoryProcess.command = root.modelHistoryCommand()
+        modelHistoryProcess.running = true
+        return
+      }
+      if (root.pendingUpdateKind !== "") {
+        var kind = root.pendingUpdateKind
+        root.pendingUpdateKind = ""
+        root.runUpdate(kind)
+      }
     }
   }
 
@@ -250,12 +297,17 @@ Item {
   }
 
   function runUpdate(kind, agentIds) {
-    if (updateProcess.running || hermesProcess.running || antigravityProcess.running) {
+    if (updateProcess.running || hermesProcess.running || antigravityProcess.running
+        || modelHistoryProcess.running || root.modelHistoryRequested || root.primaryLaunchInProgress) {
       // Collapse queued requests to one full rerun; a forced refresh outranks
       // the cheaper kinds it might have been queued behind.
       if (kind === "force" || root.pendingUpdateKind === "") root.pendingUpdateKind = kind
       return
     }
+    // The model-history collector is a second phase of every refresh, even if
+    // all three primary collectors are disabled for this installation.
+    root.modelHistoryRequested = true
+    root.primaryLaunchInProgress = true
     if (updateWanted(agentIds)) {
       updateProcess.command = updateCommand(kind, agentIds)
       updateProcess.running = true
@@ -268,6 +320,8 @@ Item {
       antigravityProcess.command = antigravityCommand(kind)
       antigravityProcess.running = true
     }
+    root.primaryLaunchInProgress = false
+    Qt.callLater(root.checkPendingUpdate)
   }
 
   function refresh() { refreshAll(true) }
@@ -287,6 +341,7 @@ Item {
   property var enabledProviders: {
     var rev = dataRevision
     var syncRev = syncRevision
+    var historyRev = modelHistoryRevision
     var result = []
     var localIds = {}
     for (var i = 0; i < agents.length; i++) {
@@ -319,10 +374,10 @@ Item {
   // All-time keeps a quiet day from hiding an agent; today's counts admit a
   // machine whose only source is history.jsonl, which knows nothing older.
   function providerHasData(p) {
-    return numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
+    return !!p && (numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
       || numberValue(p.activeDays) > 0 || numberValue(p.todayPrompts) > 0
       || numberValue(p.todaySessions) > 0 || (p.limits && p.limits.length > 0)
-      || !!p.balance
+      || !!p.balance || modelUsageByPeriodHasData(p.modelUsageByPeriod))
   }
 
   // A prepaid agent's credit ledger. Like rate limits, the balance is
@@ -359,12 +414,14 @@ Item {
   }
 
   function displayProvider(record) {
-    var stats = syncedStatsFor(String(record.id))
+    var providerId = String(record.id)
+    var stats = syncedStatsFor(providerId)
     var synced = !!stats
     var deviceCount = synced ? Number(stats.deviceCount || aggregateData.deviceCount || 0) : 0
+    var source = synced ? stats : record
 
     return {
-      providerId: String(record.id),
+      providerId: providerId,
       providerName: String(record.name || friendlyProviderDisplayName(record.id)),
       ready: record.ready === true || synced,
       usageStatusText: String(record.usageStatusText || ""),
@@ -384,11 +441,14 @@ Item {
       totalPrompts: synced ? numberValue(stats.totalPrompts) : numberValue(record.totalPrompts),
       totalSessions: synced ? numberValue(stats.totalSessions) : numberValue(record.totalSessions),
       activeDays: synced ? numberValue(stats.activeDays) : numberValue(record.activeDays),
-      modelUsage: synced ? (stats.modelUsage || ({})) : (record.modelUsage || ({})),
+      modelUsage: source.modelUsage || ({}),
+      // Native record/snapshot data wins for any period it supplies. The
+      // sidecar only fills periods missing from older provider records.
+      modelUsageByPeriod: mergeModelUsageByPeriod(source.modelUsageByPeriod, modelHistoryPeriodsFor(providerId)),
       hasLocalStats: synced ? (stats.hasLocalStats !== false) : (record.hasLocalStats !== false),
       hasPromptStats: synced ? (stats.hasPromptStats !== false) : (record.hasPromptStats !== false),
 
-      routes: Array.isArray(record.routes) ? record.routes : [],
+      routes: displayRoutes(record.routes, providerId),
 
       syncEnabled: synced,
       syncDeviceCount: deviceCount,
@@ -480,6 +540,43 @@ Item {
     watchChanges: false
     printErrors: false
     onLoaded: root.detectedHostname = String(text() || "").trim()
+  }
+
+  FileView {
+    id: modelHistoryFile
+    path: root.modelHistoryPath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.parseModelHistory(text())
+    onLoadFailed: {
+      root.modelHistoryData = ({})
+      root.modelHistoryRevision++
+    }
+  }
+
+  function parseModelHistory(content) {
+    var parsed = null
+    try {
+      parsed = JSON.parse(String(content || ""))
+    } catch (e) {
+      console.warn("agents/model-history", "Ignoring bad model history", e)
+    }
+    if (!parsed || typeof parsed !== "object" || !parsed.providers || typeof parsed.providers !== "object") {
+      root.modelHistoryData = ({})
+    } else {
+      root.modelHistoryData = parsed
+    }
+    root.modelHistoryRevision++
+  }
+
+  function modelHistoryPeriodsFor(key) {
+    var data = root.modelHistoryData
+    var providers = data && data.providers && typeof data.providers === "object" ? data.providers : ({})
+    var entry = providers[String(key)]
+    if (!entry || typeof entry !== "object" || !entry.modelUsageByPeriod
+        || typeof entry.modelUsageByPeriod !== "object") return ({})
+    return entry.modelUsageByPeriod
   }
 
   function parseSyncEnabled(value) {
@@ -629,6 +726,105 @@ Item {
     }
   }
 
+  function isModelUsagePeriod(id) {
+    return id === "today" || id === "7d" || id === "month" || id === "all"
+  }
+
+  function isPlainObject(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value)
+  }
+
+  // Period records may carry a numeric sidecar total or a Hermes token bucket.
+  // Only token fields count here; quota fields such as percent/remaining never
+  // become usage totals.
+  function modelUsageValueTotal(value) {
+    if (!isPlainObject(value)) {
+      var scalar = Number(value)
+      return isFinite(scalar) && scalar > 0 ? scalar : 0
+    }
+    var total = 0
+    total += Math.max(0, Number(value.inputTokens) || 0)
+    total += Math.max(0, Number(value.outputTokens) || 0)
+    total += Math.max(0, Number(value.cacheReadInputTokens) || 0)
+    total += Math.max(0, Number(value.cacheCreationInputTokens) || 0)
+    if (total === 0 && value.totalTokens !== undefined)
+      total = Math.max(0, Number(value.totalTokens) || 0)
+    return isFinite(total) ? total : 0
+  }
+
+  function modelUsageByPeriodHasData(periods) {
+    if (!isPlainObject(periods)) return false
+    for (var period in periods) {
+      if (!isModelUsagePeriod(period) || !isPlainObject(periods[period])) continue
+      var values = periods[period]
+      for (var modelId in values) {
+        if (modelUsageValueTotal(values[modelId]) > 0) return true
+      }
+    }
+    return false
+  }
+
+  function cloneModelUsageByPeriod(value) {
+    var result = {}
+    if (!isPlainObject(value)) return result
+    for (var period in value) {
+      if (!isModelUsagePeriod(period) || !isPlainObject(value[period])) continue
+      result[period] = cloneValue(value[period], ({}))
+    }
+    return result
+  }
+
+  // Native provider/Hermes records are authoritative. A sidecar period is
+  // only used when the native record (or an older synced snapshot) lacks it.
+  function mergeModelUsageByPeriod(primary, supplemental) {
+    var result = cloneModelUsageByPeriod(primary)
+    var extra = cloneModelUsageByPeriod(supplemental)
+    for (var period in extra) {
+      if (result[period] === undefined) result[period] = extra[period]
+    }
+    return result
+  }
+
+  function combineModelUsageValue(additive, current, value) {
+    if (isPlainObject(value) && (current === undefined || current === null || isPlainObject(current))) {
+      var bucket = isPlainObject(current) ? current : ({})
+      combineObjectNumbers(additive, bucket, value)
+      return bucket
+    }
+    if (isPlainObject(current) || isPlainObject(value))
+      return combineNumber(additive, modelUsageValueTotal(current), modelUsageValueTotal(value))
+    return combineNumber(additive, current, value)
+  }
+
+  function combineModelUsageByPeriod(additive, target, source) {
+    if (!isPlainObject(source)) return
+    for (var period in source) {
+      if (!isModelUsagePeriod(period) || !isPlainObject(source[period])) continue
+      if (!isPlainObject(target[period])) target[period] = ({})
+      var targetPeriod = target[period]
+      var sourcePeriod = source[period]
+      for (var modelId in sourcePeriod) {
+        targetPeriod[modelId] = combineModelUsageValue(additive, targetPeriod[modelId], sourcePeriod[modelId])
+      }
+    }
+  }
+
+  function displayRoutes(rawRoutes, providerId) {
+    var result = []
+    var routes = Array.isArray(rawRoutes) ? rawRoutes : []
+    for (var i = 0; i < routes.length; i++) {
+      var route = cloneValue(routes[i], null)
+      if (!isPlainObject(route)) continue
+      var routeKey = String(providerId) + ":" + String(route.id)
+      route.modelUsageByPeriod = mergeModelUsageByPeriod(
+        route.modelUsageByPeriod,
+        modelHistoryPeriodsFor(routeKey)
+      )
+      result.push(route)
+    }
+    return result
+  }
+
   function numberValue(value) {
     var n = Number(value || 0)
     return isFinite(n) ? Math.round(n) : 0
@@ -693,6 +889,7 @@ Item {
         activeDays: 0,
         activeDates: ({}),
         modelUsage: ({}),
+        modelUsageByPeriod: ({}),
         devices: ({})
       }
       return providers[id]
@@ -741,6 +938,7 @@ Item {
           if (!bucket) bucket = acc.modelUsage[modelId] = emptyTokenBucket()
           combineObjectNumbers(additive, bucket, usage[modelId] || {})
         }
+        combineModelUsageByPeriod(additive, acc.modelUsageByPeriod, stats.modelUsageByPeriod || {})
       }
     }
 
@@ -765,6 +963,7 @@ Item {
         totalSessions: acc.totalSessions,
         activeDays: Math.max(acc.activeDays, Object.keys(acc.activeDates).length),
         modelUsage: acc.modelUsage,
+        modelUsageByPeriod: acc.modelUsageByPeriod,
         deviceCount: providerDevices.length,
         devices: providerDevices
       }
@@ -799,7 +998,11 @@ Item {
       totalSessions: numberValue(record.totalSessions),
       activeDays: numberValue(record.activeDays),
       activeDates: cloneValue(record.activeDates, []),
-      modelUsage: cloneValue(record.modelUsage, ({}))
+      modelUsage: cloneValue(record.modelUsage, ({})),
+      modelUsageByPeriod: mergeModelUsageByPeriod(
+        record.modelUsageByPeriod,
+        modelHistoryPeriodsFor(String(record.id))
+      )
     }
   }
 

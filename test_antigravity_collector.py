@@ -193,7 +193,7 @@ class TestAntigravityCollector(unittest.TestCase):
     def test_manifest_publishes_antigravity_fallback(self):
         manifest = json.loads((MODULE_PATH.parent / "manifest.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(manifest["version"], "1.3.0")
+        self.assertEqual(manifest["version"], "1.4.0")
         self.assertTrue((MODULE_PATH.parent / "antigravity-collector.py").is_file())
         self.assertTrue(manifest["barWidget"]["defaults"]["providers"]["antigravity"]["enabled"])
 

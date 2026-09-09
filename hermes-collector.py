@@ -49,6 +49,95 @@ def recent_date_strings(today_dt: datetime) -> list[str]:
     return [(today_dt - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(6, -1, -1)]
 
 
+_MODEL_USAGE_PERIODS = ("today", "7d", "month", "all")
+_TOKEN_BUCKET_KEYS = (
+    "inputTokens",
+    "outputTokens",
+    "cacheReadInputTokens",
+    "cacheCreationInputTokens",
+)
+
+
+def _empty_token_bucket() -> dict[str, int]:
+    return {key: 0 for key in _TOKEN_BUCKET_KEYS}
+
+
+def _empty_model_usage_by_period() -> dict[str, dict[str, dict[str, int]]]:
+    return {period: {} for period in _MODEL_USAGE_PERIODS}
+
+
+def _accumulate_model_bucket(
+    model_usage: dict[str, dict[str, int]],
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+) -> None:
+    bucket = model_usage.setdefault(model, _empty_token_bucket())
+    bucket["inputTokens"] += input_tokens
+    bucket["outputTokens"] += output_tokens
+    bucket["cacheReadInputTokens"] += cache_read_tokens
+    bucket["cacheCreationInputTokens"] += cache_creation_tokens
+
+
+def _accumulate_daily_model_bucket(
+    daily_model_usage: dict[str, dict[str, dict[str, int]]],
+    day: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+) -> None:
+    if not day:
+        return
+    day_usage = daily_model_usage.setdefault(day, {})
+    _accumulate_model_bucket(
+        day_usage,
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+    )
+
+
+def _filter_model_usage(raw_usage: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
+    out = {}
+    for model in sorted(raw_usage.keys()):
+        bucket = raw_usage[model]
+        if sum(bucket[key] for key in _TOKEN_BUCKET_KEYS) > 0:
+            out[model] = bucket
+    return out
+
+
+def _model_usage_by_period(
+    daily_model_usage: dict[str, dict[str, dict[str, int]]],
+    period_dates: dict[str, set[str]],
+    all_model_usage: dict[str, dict[str, int]],
+) -> dict[str, dict[str, dict[str, int]]]:
+    by_period: dict[str, dict[str, dict[str, int]]] = {}
+    for period in ("today", "7d", "month"):
+        period_usage: dict[str, dict[str, int]] = {}
+        for day in period_dates[period]:
+            for model, bucket in daily_model_usage.get(day, {}).items():
+                _accumulate_model_bucket(
+                    period_usage,
+                    model,
+                    bucket["inputTokens"],
+                    bucket["outputTokens"],
+                    bucket["cacheReadInputTokens"],
+                    bucket["cacheCreationInputTokens"],
+                )
+        by_period[period] = _filter_model_usage(period_usage)
+
+    # Keep the all-time period sourced from the existing all-time modelUsage
+    # aggregation, including its established model filtering and ordering.
+    by_period["all"] = all_model_usage
+    return by_period
+
+
 # Route attribution is display metadata, not a user-controlled label. Keep an
 # explicit allow-list so an arbitrary provider/mode value cannot turn into a
 # route label, route id, secret fragment, or endpoint-like string.
@@ -190,6 +279,7 @@ def empty_route(
         "recentDays": [{"date": d, "messageCount": 0} for d in recent_dates],
         "modelUsage": {},
         "todayTokensByModel": {},
+        "modelUsageByPeriod": _empty_model_usage_by_period(),
     }
 
 
@@ -214,6 +304,7 @@ def empty_record(status_text: str = "", help_text: str = "") -> dict[str, Any]:
         "activeDays": 0,
         "activeDates": [],
         "modelUsage": {},
+        "modelUsageByPeriod": _empty_model_usage_by_period(),
         "limits": [],
         "tierLabel": "",
         "usageStatusText": status_text,
@@ -228,9 +319,15 @@ def collect_usage() -> dict[str, Any]:
         return empty_record("Hermes database not found")
 
     now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
+    today = now.date().isoformat()
     recent_dates = recent_date_strings(now)
     recent_map = {d: 0 for d in recent_dates}
+    local_today = now.date()
+    period_dates = {
+        "today": {local_today.isoformat()},
+        "7d": {(local_today - timedelta(days=offset)).isoformat() for offset in range(7)},
+        "month": {(local_today - timedelta(days=offset)).isoformat() for offset in range(30)},
+    }
 
     uri = f"file:{db_file.resolve().as_posix()}?mode=ro"
     try:
@@ -296,14 +393,6 @@ def collect_usage() -> dict[str, Any]:
         )
         rows = cur.fetchall()
 
-        def filter_model_usage(raw_usage: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
-            out = {}
-            for m in sorted(raw_usage.keys()):
-                b = raw_usage[m]
-                if (b["inputTokens"] + b["outputTokens"] + b["cacheReadInputTokens"] + b["cacheCreationInputTokens"]) > 0:
-                    out[m] = b
-            return out
-
         all_sessions = set()
         all_today_sessions = set()
         all_total_prompts = 0
@@ -311,6 +400,7 @@ def collect_usage() -> dict[str, Any]:
         all_active_dates = set()
         all_recent_map = {d: 0 for d in recent_dates}
         all_model_usage: dict[str, dict[str, int]] = {}
+        all_model_usage_by_day: dict[str, dict[str, dict[str, int]]] = {}
         all_today_tokens_by_model: dict[str, int] = {}
 
         route_accs: dict[str, dict[str, Any]] = {}
@@ -346,6 +436,15 @@ def collect_usage() -> dict[str, Any]:
             all_model_usage[model]["outputTokens"] += out_tok
             all_model_usage[model]["cacheReadInputTokens"] += cr_tok
             all_model_usage[model]["cacheCreationInputTokens"] += cw_tok
+            _accumulate_daily_model_bucket(
+                all_model_usage_by_day,
+                day,
+                model,
+                in_tok,
+                out_tok,
+                cr_tok,
+                cw_tok,
+            )
 
             if day == today:
                 all_today_sessions.add(sess_id)
@@ -371,6 +470,7 @@ def collect_usage() -> dict[str, Any]:
                     "active_dates": set(),
                     "recent_map": {d: 0 for d in recent_dates},
                     "model_usage": {},
+                    "model_usage_by_day": {},
                     "today_tokens_by_model": {},
                 }
             r_acc = route_accs[r_id]
@@ -395,6 +495,15 @@ def collect_usage() -> dict[str, Any]:
             r_acc["model_usage"][model]["outputTokens"] += out_tok
             r_acc["model_usage"][model]["cacheReadInputTokens"] += cr_tok
             r_acc["model_usage"][model]["cacheCreationInputTokens"] += cw_tok
+            _accumulate_daily_model_bucket(
+                r_acc["model_usage_by_day"],
+                day,
+                model,
+                in_tok,
+                out_tok,
+                cr_tok,
+                cw_tok,
+            )
 
             if day == today:
                 r_acc["today_sessions"].add(sess_id)
@@ -403,7 +512,12 @@ def collect_usage() -> dict[str, Any]:
                 if tot_tok > 0:
                     r_acc["today_tokens_by_model"][model] = r_acc["today_tokens_by_model"].get(model, 0) + tot_tok
 
-        model_usage = filter_model_usage(all_model_usage)
+        model_usage = _filter_model_usage(all_model_usage)
+        model_usage_by_period = _model_usage_by_period(
+            all_model_usage_by_day,
+            period_dates,
+            model_usage,
+        )
         total_prompts = all_total_prompts
         total_sessions = len(all_sessions)
         active_dates = sorted(all_active_dates)
@@ -444,11 +558,17 @@ def collect_usage() -> dict[str, Any]:
             "recentDays": recent_days,
             "modelUsage": model_usage,
             "todayTokensByModel": today_tokens_by_model,
+            "modelUsageByPeriod": model_usage_by_period,
         }
 
         individual_routes = []
         for r_id, r_acc in route_accs.items():
-            r_models = filter_model_usage(r_acc["model_usage"])
+            r_models = _filter_model_usage(r_acc["model_usage"])
+            r_model_usage_by_period = _model_usage_by_period(
+                r_acc["model_usage_by_day"],
+                period_dates,
+                r_models,
+            )
             if r_acc["total_prompts"] == 0 and r_acc["total_tokens"] == 0 and len(r_models) == 0:
                 continue
             r_recent_days = [{"date": d, "messageCount": r_acc["recent_map"][d]} for d in recent_dates]
@@ -481,6 +601,7 @@ def collect_usage() -> dict[str, Any]:
                 "recentDays": r_recent_days,
                 "modelUsage": r_models,
                 "todayTokensByModel": r_today_tokens_by_model,
+                "modelUsageByPeriod": r_model_usage_by_period,
             })
 
         individual_routes.sort(key=lambda r: (r["id"] == "unattributed", r["label"].lower(), r["id"]))
@@ -503,6 +624,7 @@ def collect_usage() -> dict[str, Any]:
             "activeDays": active_days,
             "activeDates": active_dates,
             "modelUsage": model_usage,
+            "modelUsageByPeriod": model_usage_by_period,
             "limits": [],
             "tierLabel": "",
             "usageStatusText": "",

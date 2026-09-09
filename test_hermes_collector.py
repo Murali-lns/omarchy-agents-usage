@@ -50,6 +50,70 @@ class TestHermesCollector(unittest.TestCase):
 
         self.temp_dir.cleanup()
 
+    def _create_usage_schema(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE session_model_usage (
+                session_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                first_seen REAL,
+                billing_provider TEXT,
+                billing_mode TEXT,
+                billing_base_url TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _local_day_timestamp(days_ago):
+        day = datetime.now().date() - timedelta(days=days_ago)
+        return datetime(day.year, day.month, day.day, 12, 0, 0).timestamp()
+
+    def _insert_usage_rows(self, rows):
+        conn = sqlite3.connect(self.db_path)
+        for index, row in enumerate(rows):
+            session_id = f"synthetic-{index}"
+            timestamp = self._local_day_timestamp(row["days_ago"])
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = row["bucket"]
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, 'tui', ?)",
+                (session_id, timestamp),
+            )
+            conn.execute("""
+                INSERT INTO session_model_usage (
+                    session_id, model, api_call_count, input_tokens, output_tokens,
+                    cache_read_tokens, cache_write_tokens, first_seen,
+                    billing_provider, billing_mode, billing_base_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                session_id,
+                row["model"],
+                row.get("api_calls", 1),
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                timestamp,
+                row.get("provider"),
+                row.get("mode"),
+                row.get("base_url"),
+            ))
+        conn.commit()
+        conn.close()
+
     def test_empty_database_routes(self):
         """Empty database should yield All subscriptions with 0 counts."""
         conn = sqlite3.connect(self.db_path)
@@ -89,7 +153,177 @@ class TestHermesCollector(unittest.TestCase):
         self.assertEqual(all_route["label"], "All subscriptions")
         self.assertEqual(all_route["tokens"], 0)
         self.assertEqual(all_route["apiCallCount"], 0)
+        expected_periods = {"today": {}, "7d": {}, "month": {}, "all": {}}
+        self.assertEqual(record["modelUsageByPeriod"], expected_periods)
+        self.assertEqual(all_route["modelUsageByPeriod"], expected_periods)
+        self.assertEqual(
+            self.collector.empty_route("synthetic", "Synthetic")["modelUsageByPeriod"],
+            expected_periods,
+        )
         self.assertNotIn("subscriptions", record)
+
+    def test_model_usage_by_period_aggregates_full_buckets(self):
+        """Period maps sum complete model token buckets on local calendar days."""
+        self._create_usage_schema()
+        self._insert_usage_rows([
+            {"days_ago": 0, "model": "alpha", "bucket": (10, 20, 30, 40)},
+            {"days_ago": 0, "model": "beta", "bucket": (2, 3, 4, 5)},
+            {"days_ago": 1, "model": "alpha", "bucket": (100, 200, 300, 400)},
+            {"days_ago": 1, "model": "beta", "bucket": (20, 30, 40, 50)},
+            {"days_ago": 6, "model": "alpha", "bucket": (600, 1200, 1800, 2400)},
+            {"days_ago": 7, "model": "alpha", "bucket": (700, 800, 900, 1000)},
+            {"days_ago": 29, "model": "beta", "bucket": (29, 29, 29, 29)},
+            {"days_ago": 30, "model": "alpha", "bucket": (30, 30, 30, 30)},
+        ])
+
+        record = self.collector.collect_usage()
+        periods = record["modelUsageByPeriod"]
+
+        self.assertEqual(periods["today"], {
+            "alpha": {
+                "inputTokens": 10,
+                "outputTokens": 20,
+                "cacheReadInputTokens": 30,
+                "cacheCreationInputTokens": 40,
+            },
+            "beta": {
+                "inputTokens": 2,
+                "outputTokens": 3,
+                "cacheReadInputTokens": 4,
+                "cacheCreationInputTokens": 5,
+            },
+        })
+        self.assertEqual(periods["7d"]["alpha"], {
+            "inputTokens": 710,
+            "outputTokens": 1420,
+            "cacheReadInputTokens": 2130,
+            "cacheCreationInputTokens": 2840,
+        })
+        self.assertEqual(periods["7d"]["beta"], {
+            "inputTokens": 22,
+            "outputTokens": 33,
+            "cacheReadInputTokens": 44,
+            "cacheCreationInputTokens": 55,
+        })
+        self.assertEqual(periods["month"]["alpha"], {
+            "inputTokens": 1410,
+            "outputTokens": 2220,
+            "cacheReadInputTokens": 3030,
+            "cacheCreationInputTokens": 3840,
+        })
+        self.assertEqual(periods["month"]["beta"], {
+            "inputTokens": 51,
+            "outputTokens": 62,
+            "cacheReadInputTokens": 73,
+            "cacheCreationInputTokens": 84,
+        })
+        self.assertEqual(periods["all"]["alpha"], {
+            "inputTokens": 1440,
+            "outputTokens": 2250,
+            "cacheReadInputTokens": 3060,
+            "cacheCreationInputTokens": 3870,
+        })
+        self.assertEqual(periods["all"], record["modelUsage"])
+        self.assertEqual(record["routes"][0]["modelUsageByPeriod"], periods)
+
+        for period_usage in periods.values():
+            for bucket in period_usage.values():
+                self.assertEqual(
+                    set(bucket),
+                    {
+                        "inputTokens",
+                        "outputTokens",
+                        "cacheReadInputTokens",
+                        "cacheCreationInputTokens",
+                    },
+                )
+
+    def test_model_usage_by_period_is_route_specific(self):
+        """Each discovered route gets independent period buckets and boundaries."""
+        self._create_usage_schema()
+        self._insert_usage_rows([
+            {
+                "days_ago": 0,
+                "model": "claude",
+                "bucket": (10, 20, 30, 40),
+                "provider": "anthropic",
+                "mode": "subscription",
+            },
+            {
+                "days_ago": 1,
+                "model": "claude",
+                "bucket": (100, 200, 300, 400),
+                "provider": "anthropic",
+                "mode": "subscription",
+            },
+            {
+                "days_ago": 0,
+                "model": "gpt",
+                "bucket": (1, 2, 3, 4),
+                "provider": "openai",
+                "mode": "api_key",
+            },
+            {
+                "days_ago": 7,
+                "model": "gpt",
+                "bucket": (7, 8, 9, 10),
+                "provider": "openai",
+                "mode": "api_key",
+            },
+            {
+                "days_ago": 29,
+                "model": "gpt",
+                "bucket": (29, 30, 31, 32),
+                "provider": "openai",
+                "mode": "api_key",
+            },
+            {
+                "days_ago": 30,
+                "model": "gpt",
+                "bucket": (300, 301, 302, 303),
+                "provider": "openai",
+                "mode": "api_key",
+            },
+        ])
+
+        record = self.collector.collect_usage()
+        routes = {route["id"]: route for route in record["routes"]}
+
+        anthropic_periods = routes["anthropic"]["modelUsageByPeriod"]
+        self.assertEqual(anthropic_periods["today"]["claude"], {
+            "inputTokens": 10,
+            "outputTokens": 20,
+            "cacheReadInputTokens": 30,
+            "cacheCreationInputTokens": 40,
+        })
+        self.assertEqual(anthropic_periods["7d"]["claude"], {
+            "inputTokens": 110,
+            "outputTokens": 220,
+            "cacheReadInputTokens": 330,
+            "cacheCreationInputTokens": 440,
+        })
+        self.assertEqual(anthropic_periods["month"], anthropic_periods["all"])
+
+        openai_periods = routes["openai"]["modelUsageByPeriod"]
+        self.assertEqual(openai_periods["today"]["gpt"], {
+            "inputTokens": 1,
+            "outputTokens": 2,
+            "cacheReadInputTokens": 3,
+            "cacheCreationInputTokens": 4,
+        })
+        self.assertEqual(openai_periods["7d"], openai_periods["today"])
+        self.assertEqual(openai_periods["month"]["gpt"], {
+            "inputTokens": 37,
+            "outputTokens": 40,
+            "cacheReadInputTokens": 43,
+            "cacheCreationInputTokens": 46,
+        })
+        self.assertEqual(openai_periods["all"]["gpt"], {
+            "inputTokens": 337,
+            "outputTokens": 341,
+            "cacheReadInputTokens": 345,
+            "cacheCreationInputTokens": 349,
+        })
 
     def test_older_schema_compatibility_without_billing_columns(self):
         """Legacy schema lacking billing_provider/mode columns should work gracefully."""
@@ -279,6 +513,9 @@ class TestHermesCollector(unittest.TestCase):
         conn.close()
 
         record = self.collector.collect_usage()
+        self.assertIn("modelUsageByPeriod", record)
+        for route in record["routes"]:
+            self.assertIn("modelUsageByPeriod", route)
         serialized = json.dumps(record)
         self.assertNotIn("billing_base_url", serialized)
         self.assertNotIn("billingBaseUrl", serialized)
