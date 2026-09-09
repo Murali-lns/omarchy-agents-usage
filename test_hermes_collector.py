@@ -785,6 +785,12 @@ class TestHermesCollector(unittest.TestCase):
         self.assertIn("if (used !== undefined && !isFinite(used)) used = undefined", panel_qml)
         self.assertIn("percent = clamp(percent, 0, 1)", panel_qml)
 
+    def test_hermes_icon_assets_exist_for_runtime_panel(self):
+        """The live panel must not request missing Hermes image assets."""
+        assets = Path(__file__).parent / "assets"
+        self.assertTrue((assets / "hermes.svg").is_file())
+        self.assertTrue((assets / "hermes-light.svg").is_file())
+
     def test_manifest_advertises_requested_provider_slots(self):
         """The UI must be ready for Grok and Antigravity records when available."""
         manifest = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
