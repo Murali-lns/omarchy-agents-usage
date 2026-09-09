@@ -2,10 +2,11 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// The display side of agent usage. All extraction lives behind
-// omarchy-agent-usage-update, which writes one JSON record per agent into
-// the usage directory; this file only discovers those records, watches them
-// for changes, and optionally merges snapshots synced from other machines.
+// The display side of agent usage. Omarchy's updater remains authoritative
+// for packaged collectors; this plugin also runs its guarded, user-owned
+// Antigravity fallback. Both write standard records into the usage directory;
+// this file discovers those records, watches them, and merges optional
+// snapshots synced from other machines.
 Item {
   id: root
   visible: false
@@ -162,8 +163,30 @@ Item {
     }
   }
 
+  readonly property string antigravityCollectorPath: {
+    var resolved = Qt.resolvedUrl("antigravity-collector.py").toString().replace(/^file:\/\//, "")
+    if (resolved && resolved.indexOf("/") !== -1) {
+      return resolved
+    }
+    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/antigravity-collector.py"
+  }
+
+  Process {
+    id: antigravityProcess
+    running: false
+    onExited: {
+      root.rescanAgents()
+      root.checkPendingUpdate()
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("agents/antigravity", text.trim())
+    }
+  }
+
   function checkPendingUpdate() {
-    if (!updateProcess.running && !hermesProcess.running && root.pendingUpdateKind !== "") {
+    if (!updateProcess.running && !hermesProcess.running && !antigravityProcess.running && root.pendingUpdateKind !== "") {
       var kind = root.pendingUpdateKind
       root.pendingUpdateKind = ""
       root.runUpdate(kind)
@@ -179,6 +202,15 @@ Item {
     return false
   }
 
+  function antigravityWanted(agentIds) {
+    if (!providerEnabled("antigravity")) return false
+    if (!agentIds || agentIds.length === 0) return true
+    for (var i = 0; i < agentIds.length; i++) {
+      if (agentIds[i] === "antigravity") return true
+    }
+    return false
+  }
+
   function updateWanted(agentIds) {
     if (!agentIds || agentIds.length === 0) return true
     for (var i = 0; i < agentIds.length; i++) {
@@ -189,6 +221,13 @@ Item {
 
   function hermesCommand(kind) {
     var cmd = [root.hermesCollectorPath]
+    if (kind === "force") cmd.push("--force")
+    if (kind === "limits") cmd.push("--limits-only")
+    return cmd
+  }
+
+  function antigravityCommand(kind) {
+    var cmd = [root.antigravityCollectorPath]
     if (kind === "force") cmd.push("--force")
     if (kind === "limits") cmd.push("--limits-only")
     return cmd
@@ -211,7 +250,7 @@ Item {
   }
 
   function runUpdate(kind, agentIds) {
-    if (updateProcess.running || hermesProcess.running) {
+    if (updateProcess.running || hermesProcess.running || antigravityProcess.running) {
       // Collapse queued requests to one full rerun; a forced refresh outranks
       // the cheaper kinds it might have been queued behind.
       if (kind === "force" || root.pendingUpdateKind === "") root.pendingUpdateKind = kind
@@ -224,6 +263,10 @@ Item {
     if (hermesWanted(agentIds)) {
       hermesProcess.command = hermesCommand(kind)
       hermesProcess.running = true
+    }
+    if (antigravityWanted(agentIds)) {
+      antigravityProcess.command = antigravityCommand(kind)
+      antigravityProcess.running = true
     }
   }
 
