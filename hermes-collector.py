@@ -6,7 +6,7 @@
 
 Reads the active default profile database under Hermes home directory read-only
 (SQLite URI mode=ro plus PRAGMA query_only=ON), restricts sessions to source=tui,
-aggregates all available TUI history by model from session_model_usage
+aggregates all available TUI history by model and billing route from session_model_usage
 (including main and aux task rows without double counting), and prints
 and atomically writes the record in the Omarchy record contract.
 """
@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 import tempfile
@@ -48,9 +49,128 @@ def recent_date_strings(today_dt: datetime) -> list[str]:
     return [(today_dt - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(6, -1, -1)]
 
 
+# Route attribution is display metadata, not a user-controlled label. Keep an
+# explicit allow-list so an arbitrary provider/mode value cannot turn into a
+# route label, route id, secret fragment, or endpoint-like string.
+_ROUTE_TOKEN_RE = re.compile(r"[a-z0-9]+(?:[_-][a-z0-9]+)*\Z")
+_MAX_ROUTE_TOKEN_LENGTH = 64
+_KNOWN_PROVIDER_LABELS = {
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "openrouter": "OpenRouter",
+    "deepseek": "DeepSeek",
+    "together": "Together",
+    "together_ai": "Together AI",
+    "togetherai": "Together AI",
+    "together-ai": "Together AI",
+    "fireworks": "Fireworks",
+    "groq": "Groq",
+    "google": "Google",
+    "hermes": "Hermes",
+    "ollama": "Ollama",
+    "xai": "xAI",
+    "aws": "AWS",
+    "azure": "Azure",
+    "github": "GitHub",
+}
+_KNOWN_MODE_LABELS = {
+    "subscription": "Subscription",
+    "api_key": "API Key",
+    "api-key": "API Key",
+    "apikey": "API Key",
+    "oauth": "OAuth",
+    "managed": "Managed",
+    "free": "Free",
+    "local": "Local",
+    "credits": "Credits",
+}
+
+
+def _safe_route_token(raw_value: Any) -> str:
+    """Return a bounded, syntax-safe route token or an empty string."""
+    if not isinstance(raw_value, str):
+        return ""
+    value = raw_value.strip().lower()
+    if len(value) > _MAX_ROUTE_TOKEN_LENGTH or not _ROUTE_TOKEN_RE.fullmatch(value):
+        return ""
+    return value
+
+
+def friendly_provider_name(provider: str) -> str:
+    """Return a fixed label for a known provider; never title-case unknown text."""
+    value = _safe_route_token(provider)
+    return _KNOWN_PROVIDER_LABELS.get(value, "Unattributed")
+
+
+def friendly_mode_name(mode: str) -> str:
+    """Return a fixed label for a known billing mode or Unattributed."""
+    if mode is None or (isinstance(mode, str) and mode.strip() == ""):
+        return ""
+    value = _safe_route_token(mode)
+    return _KNOWN_MODE_LABELS.get(value, "Unattributed")
+
+
+def normalize_route_info(raw_provider: Any, raw_mode: Any) -> tuple[str, str, str, str]:
+    """Normalize only known route attribution; collapse everything else safely."""
+    provider = _safe_route_token(raw_provider)
+    mode = _safe_route_token(raw_mode)
+    mode_missing = raw_mode is None or (isinstance(raw_mode, str) and raw_mode.strip() == "")
+
+    # The provider must be known before it is emitted. A missing mode preserves
+    # the historical provider-only route; any present unknown, URL-like,
+    # token-like, overlong, or malformed mode collapses the whole route.
+    if provider not in _KNOWN_PROVIDER_LABELS:
+        return "unattributed", "Unattributed", "", ""
+
+    provider_label = _KNOWN_PROVIDER_LABELS[provider]
+    if mode_missing:
+        return provider, provider_label, provider, ""
+    if mode not in _KNOWN_MODE_LABELS:
+        return "unattributed", "Unattributed", "", ""
+
+    mode_label = _KNOWN_MODE_LABELS[mode]
+    return f"{provider}:{mode}", f"{provider_label} ({mode_label})", provider, mode
+
+
+def empty_route(
+    route_id: str,
+    label: str,
+    is_all: bool = False,
+    billing_provider: str = "",
+    billing_mode: str = "",
+    recent_dates: list[str] | None = None,
+) -> dict[str, Any]:
+    if recent_dates is None:
+        recent_dates = recent_date_strings(datetime.now())
+    return {
+        "id": route_id,
+        "label": label,
+        "isAll": is_all,
+        "billingProvider": billing_provider,
+        "billingMode": billing_mode,
+        "tokens": 0,
+        "totalTokens": 0,
+        "todayTotalTokens": 0,
+        "todayTokens": 0,
+        "apiCallCount": 0,
+        "api_call_count": 0,
+        "totalPrompts": 0,
+        "todayPrompts": 0,
+        "sessions": 0,
+        "totalSessions": 0,
+        "todaySessions": 0,
+        "activeDays": 0,
+        "activeDates": [],
+        "recentDays": [{"date": d, "messageCount": 0} for d in recent_dates],
+        "modelUsage": {},
+        "todayTokensByModel": {},
+    }
+
+
 def empty_record(status_text: str = "", help_text: str = "") -> dict[str, Any]:
     now = datetime.now()
     recent_dates = recent_date_strings(now)
+    all_route = empty_route("all", "All subscriptions", is_all=True, recent_dates=recent_dates)
     return {
         "schemaVersion": 1,
         "id": AGENT_ID,
@@ -72,6 +192,7 @@ def empty_record(status_text: str = "", help_text: str = "") -> dict[str, Any]:
         "tierLabel": "",
         "usageStatusText": status_text,
         "authHelpText": help_text,
+        "routes": [all_route],
     }
 
 
@@ -121,122 +242,219 @@ def collect_usage() -> dict[str, Any]:
         if not required_sess_cols.issubset(sess_cols):
             return empty_record("Hermes sessions missing required columns")
 
+        has_billing_provider = "billing_provider" in smu_cols
+        has_billing_mode = "billing_mode" in smu_cols
+        provider_col = "smu.billing_provider" if has_billing_provider else "NULL"
+        mode_col = "smu.billing_mode" if has_billing_mode else "NULL"
+
         source_filter = "tui"
 
-        # 1. Model usage breakdown (all history)
         cur.execute(
-            """
+            f"""
             SELECT
+                s.id,
                 smu.model,
-                COALESCE(SUM(smu.input_tokens), 0) AS in_tokens,
-                COALESCE(SUM(smu.output_tokens), 0) AS out_tokens,
-                COALESCE(SUM(smu.cache_read_tokens), 0) AS cr_tokens,
-                COALESCE(SUM(smu.cache_write_tokens), 0) AS cw_tokens
-            FROM session_model_usage smu
-            JOIN sessions s ON smu.session_id = s.id
-            WHERE s.source = ?
-            GROUP BY smu.model
-            HAVING (SUM(smu.input_tokens) + SUM(smu.output_tokens) + SUM(smu.cache_read_tokens) + SUM(smu.cache_write_tokens)) > 0
-            ORDER BY smu.model
-            """,
-            (source_filter,),
-        )
-        model_usage: dict[str, dict[str, int]] = {}
-        for row in cur.fetchall():
-            model_usage[str(row[0])] = {
-                "inputTokens": int(row[1]),
-                "outputTokens": int(row[2]),
-                "cacheReadInputTokens": int(row[3]),
-                "cacheCreationInputTokens": int(row[4]),
-            }
-
-        # 2. Total prompts & total sessions
-        cur.execute(
-            """
-            SELECT
-                COALESCE(SUM(smu.api_call_count), 0) AS total_prompts,
-                COUNT(DISTINCT s.id) AS total_sessions
-            FROM session_model_usage smu
-            JOIN sessions s ON smu.session_id = s.id
-            WHERE s.source = ?
-            """,
-            (source_filter,),
-        )
-        t_prompts_row = cur.fetchone()
-        total_prompts = int(t_prompts_row[0]) if t_prompts_row else 0
-        total_sessions = int(t_prompts_row[1]) if t_prompts_row else 0
-
-        # 3. Active dates & active days count
-        cur.execute(
-            """
-            SELECT DISTINCT
-                strftime('%Y-%m-%d', COALESCE(smu.first_seen, s.started_at), 'unixepoch', 'localtime') AS day
-            FROM session_model_usage smu
-            JOIN sessions s ON smu.session_id = s.id
-            WHERE s.source = ?
-              AND (smu.input_tokens + smu.output_tokens + smu.cache_read_tokens + smu.cache_write_tokens) > 0
-            ORDER BY day
-            """,
-            (source_filter,),
-        )
-        active_dates = [str(r[0]) for r in cur.fetchall() if r[0]]
-        active_days = len(active_dates)
-
-        # 4. Today's prompts & sessions
-        cur.execute(
-            """
-            SELECT
-                COALESCE(SUM(smu.api_call_count), 0) AS today_prompts,
-                COUNT(DISTINCT s.id) AS today_sessions
-            FROM session_model_usage smu
-            JOIN sessions s ON smu.session_id = s.id
-            WHERE s.source = ?
-              AND strftime('%Y-%m-%d', COALESCE(smu.first_seen, s.started_at), 'unixepoch', 'localtime') = ?
-            """,
-            (source_filter, today),
-        )
-        today_row = cur.fetchone()
-        today_prompts = int(today_row[0]) if today_row else 0
-        today_sessions = int(today_row[1]) if today_row else 0
-
-        # 5. Today's tokens by model & total
-        cur.execute(
-            """
-            SELECT
-                smu.model,
-                COALESCE(SUM(smu.input_tokens + smu.output_tokens + smu.cache_read_tokens + smu.cache_write_tokens), 0) AS tokens
-            FROM session_model_usage smu
-            JOIN sessions s ON smu.session_id = s.id
-            WHERE s.source = ?
-              AND strftime('%Y-%m-%d', COALESCE(smu.first_seen, s.started_at), 'unixepoch', 'localtime') = ?
-            GROUP BY smu.model
-            HAVING (SUM(smu.input_tokens + smu.output_tokens + smu.cache_read_tokens + smu.cache_write_tokens)) > 0
-            ORDER BY smu.model
-            """,
-            (source_filter, today),
-        )
-        today_tokens_by_model = {str(r[0]): int(r[1]) for r in cur.fetchall()}
-        today_total_tokens = sum(today_tokens_by_model.values())
-
-        # 6. Recent days tokens
-        cur.execute(
-            """
-            SELECT
+                COALESCE(smu.api_call_count, 0),
+                COALESCE(smu.input_tokens, 0),
+                COALESCE(smu.output_tokens, 0),
+                COALESCE(smu.cache_read_tokens, 0),
+                COALESCE(smu.cache_write_tokens, 0),
                 strftime('%Y-%m-%d', COALESCE(smu.first_seen, s.started_at), 'unixepoch', 'localtime') AS day,
-                COALESCE(SUM(smu.input_tokens + smu.output_tokens + smu.cache_read_tokens + smu.cache_write_tokens), 0) AS tokens
+                {provider_col} AS raw_provider,
+                {mode_col} AS raw_mode
             FROM session_model_usage smu
             JOIN sessions s ON smu.session_id = s.id
             WHERE s.source = ?
-              AND strftime('%Y-%m-%d', COALESCE(smu.first_seen, s.started_at), 'unixepoch', 'localtime') >= ?
-            GROUP BY day
             """,
-            (source_filter, recent_dates[0]),
+            (source_filter,),
         )
-        for r in cur.fetchall():
-            day_str = str(r[0])
-            if day_str in recent_map:
-                recent_map[day_str] = int(r[1])
-        recent_days = [{"date": d, "messageCount": recent_map[d]} for d in recent_dates]
+        rows = cur.fetchall()
+
+        def filter_model_usage(raw_usage: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
+            out = {}
+            for m in sorted(raw_usage.keys()):
+                b = raw_usage[m]
+                if (b["inputTokens"] + b["outputTokens"] + b["cacheReadInputTokens"] + b["cacheCreationInputTokens"]) > 0:
+                    out[m] = b
+            return out
+
+        all_sessions = set()
+        all_today_sessions = set()
+        all_total_prompts = 0
+        all_today_prompts = 0
+        all_active_dates = set()
+        all_recent_map = {d: 0 for d in recent_dates}
+        all_model_usage: dict[str, dict[str, int]] = {}
+        all_today_tokens_by_model: dict[str, int] = {}
+
+        route_accs: dict[str, dict[str, Any]] = {}
+
+        for row in rows:
+            sess_id = str(row[0])
+            model = str(row[1])
+            api_calls = int(row[2] or 0)
+            in_tok = int(row[3] or 0)
+            out_tok = int(row[4] or 0)
+            cr_tok = int(row[5] or 0)
+            cw_tok = int(row[6] or 0)
+            tot_tok = in_tok + out_tok + cr_tok + cw_tok
+            day = str(row[7]) if row[7] else ""
+            raw_prov = row[8]
+            raw_mode = row[9]
+
+            all_sessions.add(sess_id)
+            all_total_prompts += api_calls
+            if tot_tok > 0 and day:
+                all_active_dates.add(day)
+            if day in all_recent_map:
+                all_recent_map[day] += tot_tok
+
+            if model not in all_model_usage:
+                all_model_usage[model] = {
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheReadInputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                }
+            all_model_usage[model]["inputTokens"] += in_tok
+            all_model_usage[model]["outputTokens"] += out_tok
+            all_model_usage[model]["cacheReadInputTokens"] += cr_tok
+            all_model_usage[model]["cacheCreationInputTokens"] += cw_tok
+
+            if day == today:
+                all_today_sessions.add(sess_id)
+                all_today_prompts += api_calls
+                if tot_tok > 0:
+                    all_today_tokens_by_model[model] = all_today_tokens_by_model.get(model, 0) + tot_tok
+
+            r_id, r_label, clean_prov, clean_mode = normalize_route_info(raw_prov, raw_mode)
+            if r_id not in route_accs:
+                route_accs[r_id] = {
+                    "id": r_id,
+                    "label": r_label,
+                    "isAll": False,
+                    "billingProvider": clean_prov,
+                    "billingMode": clean_mode,
+                    "sessions": set(),
+                    "today_sessions": set(),
+                    "total_prompts": 0,
+                    "today_prompts": 0,
+                    "total_tokens": 0,
+                    "today_tokens": 0,
+                    "active_dates": set(),
+                    "recent_map": {d: 0 for d in recent_dates},
+                    "model_usage": {},
+                    "today_tokens_by_model": {},
+                }
+            r_acc = route_accs[r_id]
+            r_acc["sessions"].add(sess_id)
+            r_acc["total_prompts"] += api_calls
+            r_acc["total_tokens"] += tot_tok
+            if tot_tok > 0 and day:
+                r_acc["active_dates"].add(day)
+            if day in r_acc["recent_map"]:
+                r_acc["recent_map"][day] += tot_tok
+
+            if model not in r_acc["model_usage"]:
+                r_acc["model_usage"][model] = {
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheReadInputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                }
+            r_acc["model_usage"][model]["inputTokens"] += in_tok
+            r_acc["model_usage"][model]["outputTokens"] += out_tok
+            r_acc["model_usage"][model]["cacheReadInputTokens"] += cr_tok
+            r_acc["model_usage"][model]["cacheCreationInputTokens"] += cw_tok
+
+            if day == today:
+                r_acc["today_sessions"].add(sess_id)
+                r_acc["today_prompts"] += api_calls
+                r_acc["today_tokens"] += tot_tok
+                if tot_tok > 0:
+                    r_acc["today_tokens_by_model"][model] = r_acc["today_tokens_by_model"].get(model, 0) + tot_tok
+
+        model_usage = filter_model_usage(all_model_usage)
+        total_prompts = all_total_prompts
+        total_sessions = len(all_sessions)
+        active_dates = sorted(all_active_dates)
+        active_days = len(active_dates)
+        today_prompts = all_today_prompts
+        today_sessions = len(all_today_sessions)
+        today_tokens_by_model = {
+            m: all_today_tokens_by_model[m]
+            for m in sorted(all_today_tokens_by_model)
+            if all_today_tokens_by_model[m] > 0
+        }
+        today_total_tokens = sum(today_tokens_by_model.values())
+        recent_days = [{"date": d, "messageCount": all_recent_map[d]} for d in recent_dates]
+        all_total_tokens = sum(
+            b["inputTokens"] + b["outputTokens"] + b["cacheReadInputTokens"] + b["cacheCreationInputTokens"]
+            for b in model_usage.values()
+        )
+
+        all_route = {
+            "id": "all",
+            "label": "All subscriptions",
+            "isAll": True,
+            "billingProvider": "",
+            "billingMode": "",
+            "tokens": all_total_tokens,
+            "totalTokens": all_total_tokens,
+            "todayTotalTokens": today_total_tokens,
+            "todayTokens": today_total_tokens,
+            "apiCallCount": total_prompts,
+            "api_call_count": total_prompts,
+            "totalPrompts": total_prompts,
+            "todayPrompts": today_prompts,
+            "sessions": total_sessions,
+            "totalSessions": total_sessions,
+            "todaySessions": today_sessions,
+            "activeDays": active_days,
+            "activeDates": active_dates,
+            "recentDays": recent_days,
+            "modelUsage": model_usage,
+            "todayTokensByModel": today_tokens_by_model,
+        }
+
+        individual_routes = []
+        for r_id, r_acc in route_accs.items():
+            r_models = filter_model_usage(r_acc["model_usage"])
+            if r_acc["total_prompts"] == 0 and r_acc["total_tokens"] == 0 and len(r_models) == 0:
+                continue
+            r_recent_days = [{"date": d, "messageCount": r_acc["recent_map"][d]} for d in recent_dates]
+            r_today_tokens_by_model = {
+                m: r_acc["today_tokens_by_model"][m]
+                for m in sorted(r_acc["today_tokens_by_model"])
+                if r_acc["today_tokens_by_model"][m] > 0
+            }
+            r_active_dates = sorted(r_acc["active_dates"])
+            individual_routes.append({
+                "id": r_acc["id"],
+                "label": r_acc["label"],
+                "isAll": False,
+                "billingProvider": r_acc["billingProvider"],
+                "billingMode": r_acc["billingMode"],
+                "tokens": r_acc["total_tokens"],
+                "totalTokens": r_acc["total_tokens"],
+                "todayTotalTokens": r_acc["today_tokens"],
+                "todayTokens": r_acc["today_tokens"],
+                "apiCallCount": r_acc["total_prompts"],
+                "api_call_count": r_acc["total_prompts"],
+                "totalPrompts": r_acc["total_prompts"],
+                "todayPrompts": r_acc["today_prompts"],
+                "sessions": len(r_acc["sessions"]),
+                "totalSessions": len(r_acc["sessions"]),
+                "todaySessions": len(r_acc["today_sessions"]),
+                "activeDays": len(r_active_dates),
+                "activeDates": r_active_dates,
+                "recentDays": r_recent_days,
+                "modelUsage": r_models,
+                "todayTokensByModel": r_today_tokens_by_model,
+            })
+
+        individual_routes.sort(key=lambda r: (r["id"] == "unattributed", r["label"].lower(), r["id"]))
+        routes = [all_route] + individual_routes
 
         return {
             "schemaVersion": 1,
@@ -259,6 +477,7 @@ def collect_usage() -> dict[str, Any]:
             "tierLabel": "",
             "usageStatusText": "",
             "authHelpText": "",
+            "routes": routes,
         }
     except sqlite3.OperationalError as exc:
         target_path = usage_dir_path() / f"{AGENT_ID}.json"

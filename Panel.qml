@@ -30,6 +30,35 @@ Panel {
   }
   readonly property var provider: providers.length > 0 ? providers[providerIndex] : null
 
+  // Hermes subscription-route selection and state
+  property string selectedHermesRouteId: "all"
+  readonly property var hermesRoutes: (root.provider && root.provider.providerId === "hermes" && Array.isArray(root.provider.routes))
+    ? root.provider.routes
+    : []
+  readonly property var availableHermesRoutes: {
+    var out = []
+    for (var i = 0; i < hermesRoutes.length; i++) {
+      if (hermesRoutes[i] && hermesRoutes[i].id !== "all" && !hermesRoutes[i].isAll)
+        out.push(hermesRoutes[i])
+    }
+    return out
+  }
+  readonly property bool showHermesRouteBar: !!root.provider
+    && root.provider.providerId === "hermes"
+    && availableHermesRoutes.length > 1
+  readonly property var selectedHermesRoute: {
+    if (!root.provider || root.provider.providerId !== "hermes" || hermesRoutes.length === 0)
+      return null
+    for (var i = 0; i < hermesRoutes.length; i++) {
+      if (hermesRoutes[i] && hermesRoutes[i].id === root.selectedHermesRouteId)
+        return hermesRoutes[i]
+    }
+    return hermesRoutes[0]
+  }
+  readonly property var activeHermesSource: (root.provider && root.provider.providerId === "hermes" && root.selectedHermesRoute)
+    ? root.selectedHermesRoute
+    : root.provider
+
   property bool cursorActive: false
 
   // Countdowns and "updated" read this instead of Date.now() so the
@@ -181,6 +210,11 @@ Panel {
   function heroMeta(p) {
     if (!p) return ""
     if (String(p.usageStatusText || "") !== "") return p.usageStatusText
+    if (p.providerId === "hermes" && root.selectedHermesRoute) {
+      if (root.selectedHermesRoute.id !== "all" && root.selectedHermesRoute.label)
+        return root.selectedHermesRoute.label
+      return "Subscription"
+    }
     var tier = String(p.tierLabel || "")
     if (tier === "") return "Subscription"
     return tier.charAt(0).toUpperCase() + tier.slice(1)
@@ -216,21 +250,34 @@ Panel {
     // Prompt and session counts only exist for today, so they ride along here
     // instead of taking a section of their own. Billing-API agents never
     // count prompts, and "0 prompts" would read as a quiet day, not a gap.
-    if (today && provider && provider.hasPromptStats !== false)
-      text += " · " + Number(provider.todayPrompts || 0) + " prompts · "
-        + Number(provider.todaySessions || 0) + " sessions"
+    var activeSource = (provider && provider.providerId === "hermes" && root.selectedHermesRoute)
+      ? root.selectedHermesRoute
+      : provider
+    if (today && activeSource && provider && provider.hasPromptStats !== false)
+      text += " · " + Number(activeSource.todayPrompts || 0) + " prompts · "
+        + Number(activeSource.todaySessions || 0) + " sessions"
     return text
   }
 
   function weekPeak(p) {
-    var days = p ? (p.recentDays || []) : []
+    var days = []
+    if (p && p.providerId === "hermes" && root.selectedHermesRoute) {
+      days = root.selectedHermesRoute.recentDays || []
+    } else if (p) {
+      days = p.recentDays || []
+    }
     var peak = 0
     for (var i = 0; i < days.length; i++) peak = Math.max(peak, Number(days[i].messageCount || 0))
     return peak
   }
 
   function modelRows(p) {
-    var usageByModel = p ? (p.modelUsage || {}) : {}
+    var usageByModel = {}
+    if (p && p.providerId === "hermes" && root.selectedHermesRoute) {
+      usageByModel = root.selectedHermesRoute.modelUsage || {}
+    } else if (p) {
+      usageByModel = p.modelUsage || {}
+    }
     var rows = []
     for (var id in usageByModel) {
       var bucket = usageByModel[id] || {}
@@ -494,6 +541,37 @@ Panel {
             }
           }
 
+          // ---------- Hermes subscription route switch ----------
+          Flow {
+            id: hermesRouteBar
+            visible: root.showHermesRouteBar
+            width: parent.width
+            spacing: Style.spacing.sm
+
+            Repeater {
+              model: root.hermesRoutes
+
+              Button {
+                required property var modelData
+                required property int index
+
+                text: modelData.label || "Route"
+                selected: root.selectedHermesRoute
+                  ? root.selectedHermesRoute.id === modelData.id
+                  : (index === 0)
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                verticalPadding: Style.space(4)
+                horizontalPadding: Style.space(8)
+                onClicked: {
+                  root.selectedHermesRouteId = String(modelData.id)
+                }
+              }
+            }
+          }
+
           // ---------- Status ----------
           BorderSurface {
             visible: !!root.provider && String(root.provider.usageStatusText || "") !== ""
@@ -611,6 +689,98 @@ Panel {
             }
           }
 
+          // ---------- Hermes Activity (API calls, sessions, active days) ----------
+          PanelSeparator {
+            visible: hermesActivitySection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: hermesActivitySection
+            visible: !!root.provider && root.provider.providerId === "hermes"
+            width: parent.width
+            spacing: Style.space(8)
+
+            readonly property var activeSource: root.activeHermesSource
+            readonly property int apiCalls: activeSource ? Number(activeSource.apiCallCount || activeSource.totalPrompts || 0) : 0
+            readonly property int totalSessions: activeSource ? Number(activeSource.sessions || activeSource.totalSessions || 0) : 0
+            readonly property int activeDaysCount: activeSource ? Number(activeSource.activeDays || 0) : 0
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "ACTIVITY"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.spacing.md
+
+              readonly property real cellWidth: (width - spacing * 2) / 3
+
+              Column {
+                width: parent.cellWidth
+                spacing: Style.space(2)
+                Text {
+                  textFormat: Text.PlainText
+                  text: "API Calls"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  text: usage.formatTokenCount(hermesActivitySection.apiCalls)
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+              }
+
+              Column {
+                width: parent.cellWidth
+                spacing: Style.space(2)
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Sessions"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  text: String(hermesActivitySection.totalSessions)
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+              }
+
+              Column {
+                width: parent.cellWidth
+                spacing: Style.space(2)
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Active Days"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  text: String(hermesActivitySection.activeDaysCount)
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+              }
+            }
+          }
+
           // ---------- Usage ----------
           PanelSeparator {
             visible: usageSection.visible
@@ -619,12 +789,16 @@ Panel {
 
           Column {
             id: usageSection
-            visible: !!root.provider && root.provider.recentDays && root.provider.recentDays.length > 0
+            readonly property var days: {
+              if (root.provider && root.provider.providerId === "hermes" && root.selectedHermesRoute) {
+                return root.selectedHermesRoute.recentDays || []
+              }
+              return root.provider ? (root.provider.recentDays || []) : []
+            }
+            readonly property real peak: Math.max(1, root.weekPeak(root.provider))
+            visible: !!root.provider && days.length > 0
             width: parent.width
             spacing: Style.spacing.md
-
-            readonly property var days: root.provider ? (root.provider.recentDays || []) : []
-            readonly property real peak: Math.max(1, root.weekPeak(root.provider))
 
             PanelSectionHeader {
               width: parent.width

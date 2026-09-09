@@ -7,12 +7,21 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 - Shows available local AI-agent usage records in one bar widget.
 - Displays limits, today’s prompts and sessions, seven-day history, and model token breakdowns.
 - Collects Hermes TUI usage from the local `~/.hermes/state.db` database in read-only mode.
+- Supports Hermes subscription routes: aggregates overall usage and breaks down metrics by billing provider and mode.
 - Writes Hermes’ display record to the user’s local `~/.local/state/omarchy/agents/usage/hermes.json`.
 - The Hermes collector never reads or sends prompt text, message content, API keys, or credentials, and does not use a network connection.
 - The Claude Code, Codex, and Fireworks records are collected through Omarchy’s existing provider tools and retain their normal local/network and credential behavior.
 - Optional cross-device aggregation is off by default and is enabled only through the user’s explicit widget settings.
 
 The plugin runs with the user’s normal desktop permissions inside the Omarchy shell. Review the source before enabling it, as with every third-party Omarchy plugin.
+
+## Hermes subscription routes
+
+When your local Hermes installation uses multiple backend routes, a nested route option bar appears within the Hermes tab:
+
+- **Local-only selector**: The option bar allows switching between "All subscriptions" and specific billing routes (e.g., Anthropic subscription, OpenAI API key, or Unattributed), filtering the Hermes summary, 7-day token chart, activity metrics (API calls, sessions, active days), and model breakdown. This selector and its route data stay local to the machine running Hermes; route/subscription fields are omitted from synced snapshots and are never transmitted or merged across synced devices. It is automatically hidden when zero or only one route exists.
+- **Meaning and local accounting**: Route metrics are calculated entirely from the local `~/.hermes/state.db` database (`session_model_usage`). There is no remote quota, plan, balance, or rate-limit lookup against provider APIs.
+- **Same-provider/mode account limitation**: Billing attribution is grouped strictly by `(billing_provider, billing_mode)`. If you configure multiple accounts, credentials, or keys that share the exact same provider and mode, their metrics are combined into that single route because the Hermes database schema does not track distinct account identifiers under the same provider and mode.
 
 ## Interface example
 
@@ -57,7 +66,7 @@ omarchy-shell io.github.murali-lns.agents-usage refresh
 
 ## Privacy and data boundaries
 
-The Hermes collector reads only the active Hermes database path selected by `HERMES_HOME`, or `~/.hermes/state.db` when that variable is unset. It filters to TUI sessions and aggregates counts and token totals by model. The repository contains no user database, generated usage JSON, shell configuration, cache, credential, API key, prompt, or message content.
+The Hermes collector reads only the active Hermes database path selected by `HERMES_HOME`, or `~/.hermes/state.db` when that variable is unset. It filters to TUI sessions and aggregates counts and token totals by model and billing route (`billing_provider` + `billing_mode`). Route/subscription data remains local-only and is deliberately omitted from synced snapshots; synced aggregation contains provider-level count and model totals only. The repository contains no user database, generated usage JSON, shell configuration, cache, credential, API key, prompt, or message content.
 
 ## License and attribution
 

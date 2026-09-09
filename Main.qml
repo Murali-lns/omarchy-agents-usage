@@ -328,6 +328,8 @@ Item {
       hasLocalStats: synced ? (stats.hasLocalStats !== false) : (record.hasLocalStats !== false),
       hasPromptStats: synced ? (stats.hasPromptStats !== false) : (record.hasPromptStats !== false),
 
+      routes: Array.isArray(record.routes) ? record.routes : [],
+
       syncEnabled: synced,
       syncDeviceCount: deviceCount,
       syncUpdatedAt: aggregateData && aggregateData.updatedAt ? aggregateData.updatedAt : ""
