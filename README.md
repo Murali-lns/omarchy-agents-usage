@@ -10,7 +10,7 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 - Normalizes provider limit records to show only windows actually supplied by upstream providers (session/5-hour, weekly, monthly, reset times, used/limit/remaining, and plan labels).
 - Shows a truthful "Limit unavailable / usage-only" status when a provider lacks a safe official quota source, preserving local usage metrics without fabricating quotas.
 - Collects Hermes TUI usage from the local `~/.hermes/state.db` database in read-only mode.
-- Automatically discovers Hermes provider/subscription routes from recorded models and usage, grouping all models and metrics under safe canonical provider routes (such as OpenAI Codex, OpenCode Go, Grok, Google Gemini, Anthropic, OpenRouter, and Nous).
+- Automatically discovers Hermes provider/subscription routes from recorded models and usage, grouping all models and metrics under safe canonical provider routes (such as OpenAI Codex, OpenCode Go, Grok, Google Gemini, Anthropic, OpenRouter, and Nous). Hermes’ `xai-oauth` subscription provider ID is normalized to the Grok route.
 - Keeps Hermes API transport modes (e.g., chat_completions, codex_responses, anthropic_messages) aggregated under their respective provider routes without splitting subscriptions.
 - Never infers subscriptions from model names alone (for example, grok-4.6 routed through OpenCode Go remains OpenCode Go).
 - Writes Hermes’ display record to the user’s local `~/.local/state/omarchy/agents/usage/hermes.json`.

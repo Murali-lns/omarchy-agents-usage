@@ -660,6 +660,8 @@ class TestHermesCollector(unittest.TestCase):
         self.assertEqual(known, ("openai", "OpenAI", "openai", "api_key"))
         provider_only = self.collector.normalize_route_info("OpenAI", None)
         self.assertEqual(provider_only, ("openai", "OpenAI", "openai", ""))
+        grok_oauth = self.collector.normalize_route_info("xai-oauth", "codex_responses")
+        self.assertEqual(grok_oauth, ("xai", "Grok", "xai", "codex_responses"))
 
         unsafe_providers = [
             ("Acme Cloud", "subscription"),
@@ -722,6 +724,10 @@ class TestHermesCollector(unittest.TestCase):
             ('s1', 'm9', 9, 900, 0, 0, 0, ?, 'claude', 'anthropic_messages'),
             ('s1', 'm10', 10, 1000, 0, 0, 0, ?, 'anthropic', 'anthropic_messages')
         """, (now_ts,) * 10)
+        conn.execute("""
+            INSERT INTO session_model_usage VALUES
+            ('s1', 'm11', 7, 700, 0, 0, 0, ?, 'xai-oauth', 'codex_responses')
+        """, (now_ts,))
         conn.commit()
         conn.close()
 
@@ -740,11 +746,11 @@ class TestHermesCollector(unittest.TestCase):
         self.assertEqual(routes["opencode-go"]["tokens"], 700)
         self.assertEqual(routes["opencode-go"]["apiCallCount"], 7)
 
-        # xai and grok must be merged into xai with label Grok
+        # xai, grok, and Hermes' xai-oauth alias must merge into xai with label Grok
         self.assertIn("xai", routes)
         self.assertEqual(routes["xai"]["label"], "Grok")
-        self.assertEqual(routes["xai"]["tokens"], 1100)
-        self.assertEqual(routes["xai"]["apiCallCount"], 11)
+        self.assertEqual(routes["xai"]["tokens"], 1800)
+        self.assertEqual(routes["xai"]["apiCallCount"], 18)
 
         # google and gemini must be merged into google with label Google Gemini
         self.assertIn("google", routes)

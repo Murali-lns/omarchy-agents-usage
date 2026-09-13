@@ -373,7 +373,7 @@ Item {
     if (key === "codex") return "Codex"
     if (key === "fireworks") return "Fireworks"
     if (key === "hermes") return "Hermes"
-    if (key === "grok" || key === "xai") return "Grok"
+    if (key === "grok" || key === "xai" || key === "xai-oauth") return "Grok"
     if (key === "openai-codex") return "OpenAI Codex"
     if (key === "opencode-go") return "OpenCode Go"
     if (key === "openrouter") return "OpenRouter"

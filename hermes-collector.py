@@ -153,6 +153,8 @@ _KNOWN_PROVIDER_ALIASES: dict[str, tuple[str, str]] = {
     "anthropic": ("anthropic", "Anthropic"),
     "claude": ("anthropic", "Anthropic"),
     "xai": ("xai", "Grok"),
+    # Hermes uses this provider ID for its subscription OAuth route.
+    "xai-oauth": ("xai", "Grok"),
     "grok": ("xai", "Grok"),
     "google": ("google", "Google Gemini"),
     "gemini": ("google", "Google Gemini"),
