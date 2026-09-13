@@ -53,10 +53,14 @@ class TestQmlModelPeriods(unittest.TestCase):
     def test_history_collector_starts_only_after_all_primary_collectors(self):
         pending = self.block(self.main, "function checkPendingUpdate()", "\n  function hermesWanted")
         self.assertIn("modelHistoryProcess.running", pending)
+        self.assertIn("grokProcess.running", pending)
         self.assertRegex(
             pending,
-            r"!updateProcess\.running\s*&&\s*!hermesProcess\.running\s*&&\s*!modelHistoryProcess\.running",
+            r"!updateProcess\.running\s*&&\s*!hermesProcess\.running\s*&&\s*!grokProcess\.running\s*&&\s*!modelHistoryProcess\.running",
         )
+        self.assertIn("grok-collector.py", self.main)
+        self.assertIn("function grokWanted", self.main)
+        self.assertIn("grokProcess.command = grokCommand(kind)", self.main)
         self.assertIn("modelHistoryRequested", pending)
         self.assertLess(pending.index("modelHistoryProcess.command ="), pending.index("modelHistoryProcess.running = true"))
         self.assertIn("model-history-collector.py", self.main)
@@ -122,7 +126,7 @@ class TestQmlModelPeriods(unittest.TestCase):
         )
 
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.4.3")
+        self.assertEqual(manifest["version"], "1.4.4")
         providers = manifest["barWidget"]["defaults"]["providers"]
         self.assertEqual(set(providers), {"claude", "codex", "fireworks", "hermes", "grok"})
         self.assertTrue(all(config.get("enabled") is True for config in providers.values()))

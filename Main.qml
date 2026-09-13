@@ -3,8 +3,9 @@ import Quickshell
 import Quickshell.Io
 
 // The display side of agent usage. Omarchy's updater remains authoritative
-// for packaged collectors; this plugin runs the Hermes collector and the
-// supplemental model-history phase. This file discovers standard records,
+// for packaged collectors; this plugin runs the Hermes collector, a Grok
+// collector that defers to Omarchy when `omarchy-agent-usage-grok` exists,
+// and the supplemental model-history phase. This file discovers standard records,
 // watches them, and merges optional snapshots synced from other machines.
 Item {
   id: root
@@ -178,6 +179,28 @@ Item {
     }
   }
 
+  readonly property string grokCollectorPath: {
+    var resolved = Qt.resolvedUrl("grok-collector.py").toString().replace(/^file:\/\//, "")
+    if (resolved && resolved.indexOf("/") !== -1) {
+      return resolved
+    }
+    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/grok-collector.py"
+  }
+
+  Process {
+    id: grokProcess
+    running: false
+    onExited: {
+      root.rescanAgents()
+      root.checkPendingUpdate()
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("agents/grok", text.trim())
+    }
+  }
+
   readonly property string modelHistoryCollectorPath: {
     var resolved = Qt.resolvedUrl("model-history-collector.py").toString().replace(/^file:\/\//, "")
     if (resolved && resolved.indexOf("/") !== -1) {
@@ -212,7 +235,7 @@ Item {
 
   function checkPendingUpdate() {
     if (!root.primaryLaunchInProgress && !updateProcess.running && !hermesProcess.running
-        && !modelHistoryProcess.running) {
+        && !grokProcess.running && !modelHistoryProcess.running) {
       if (root.modelHistoryRequested) {
         root.modelHistoryRequested = false
         modelHistoryProcess.command = root.modelHistoryCommand()
@@ -236,16 +259,32 @@ Item {
     return false
   }
 
+  function grokWanted(agentIds) {
+    if (!providerEnabled("grok")) return false
+    if (!agentIds || agentIds.length === 0) return true
+    for (var i = 0; i < agentIds.length; i++) {
+      if (agentIds[i] === "grok") return true
+    }
+    return false
+  }
+
   function updateWanted(agentIds) {
     if (!agentIds || agentIds.length === 0) return true
     for (var i = 0; i < agentIds.length; i++) {
-      if (agentIds[i] !== "hermes") return true
+      if (agentIds[i] !== "hermes" && agentIds[i] !== "grok") return true
     }
     return false
   }
 
   function hermesCommand(kind) {
     var cmd = [root.hermesCollectorPath]
+    if (kind === "force") cmd.push("--force")
+    if (kind === "limits") cmd.push("--limits-only")
+    return cmd
+  }
+
+  function grokCommand(kind) {
+    var cmd = [root.grokCollectorPath]
     if (kind === "force") cmd.push("--force")
     if (kind === "limits") cmd.push("--limits-only")
     return cmd
@@ -262,14 +301,14 @@ Item {
     }
     if (agentIds) {
       for (var i = 0; i < agentIds.length; i++) {
-        if (!root.isRetiredProviderId(agentIds[i]) && agentIds[i] !== "hermes") command.push(agentIds[i])
+        if (!root.isRetiredProviderId(agentIds[i]) && agentIds[i] !== "hermes" && agentIds[i] !== "grok") command.push(agentIds[i])
       }
     }
     return command
   }
 
   function runUpdate(kind, agentIds) {
-    if (updateProcess.running || hermesProcess.running
+    if (updateProcess.running || hermesProcess.running || grokProcess.running
         || modelHistoryProcess.running || root.modelHistoryRequested || root.primaryLaunchInProgress) {
       // Collapse queued requests to one full rerun; a forced refresh outranks
       // the cheaper kinds it might have been queued behind.
@@ -287,6 +326,10 @@ Item {
     if (hermesWanted(agentIds)) {
       hermesProcess.command = hermesCommand(kind)
       hermesProcess.running = true
+    }
+    if (grokWanted(agentIds)) {
+      grokProcess.command = grokCommand(kind)
+      grokProcess.running = true
     }
     root.primaryLaunchInProgress = false
     Qt.callLater(root.checkPendingUpdate)
