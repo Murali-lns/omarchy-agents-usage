@@ -152,10 +152,11 @@ _KNOWN_PROVIDER_ALIASES: dict[str, tuple[str, str]] = {
     "opencode": ("opencode-go", "OpenCode Go"),
     "anthropic": ("anthropic", "Anthropic"),
     "claude": ("anthropic", "Anthropic"),
-    "xai": ("xai", "Grok"),
-    # Hermes uses this provider ID for its subscription OAuth route.
-    "xai-oauth": ("xai", "Grok"),
-    "grok": ("xai", "Grok"),
+    # Keep API-key and subscription OAuth routes separate: they share model
+    # names but represent different billing identities.
+    "xai": ("xai", "Grok API"),
+    "xai-oauth": ("xai-oauth", "Grok Subscription"),
+    "grok": ("xai", "Grok API"),
     "google": ("google", "Google Gemini"),
     "gemini": ("google", "Google Gemini"),
     "openrouter": ("openrouter", "OpenRouter"),
@@ -227,7 +228,8 @@ def normalize_route_info(raw_provider: Any, raw_mode: Any) -> tuple[str, str, st
     An unknown, missing, malformed, URL-like, or secret-like provider collapses to
     ('unattributed', 'Unattributed', '', ''). A missing or unfamiliar transport
     mode does *not* erase a valid provider: it is omitted from the display record.
-    Routes are grouped strictly by provider (never split by API transport mode).
+    Routes are grouped strictly by safe provider identity; transport mode never
+    creates a separate route.
     """
     provider = _safe_route_token(raw_provider)
     mode_missing = raw_mode is None or (isinstance(raw_mode, str) and raw_mode.strip() == "")
