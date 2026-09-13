@@ -27,6 +27,8 @@ class TestGrokCollector(unittest.TestCase):
             "GROK_HOME": os.environ.get("GROK_HOME"),
             "XDG_STATE_HOME": os.environ.get("XDG_STATE_HOME"),
             "OMARCHY_PATH": os.environ.get("OMARCHY_PATH"),
+            "PATH": os.environ.get("PATH"),
+            "GROK_BIN": os.environ.get("GROK_BIN"),
         }
         os.environ["GROK_HOME"] = str(self.grok_home)
         os.environ["XDG_STATE_HOME"] = str(self.xdg_state_home)
@@ -292,6 +294,89 @@ class TestGrokCollector(unittest.TestCase):
 
         self.assertEqual(self.collector.main([]), 0)
         self.assertEqual(marker.read_text(encoding="utf-8"), '{"id":"official-marker"}\n')
+
+    def test_parse_billing_weekly_window_and_reset(self):
+        parsed = self.collector.parse_billing(
+            {
+                "subscription_tier": "SuperGrokPlus",
+                "config": {
+                    "creditUsagePercent": 12.5,
+                    "currentPeriod": {
+                        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                        "start": "2026-09-08T00:00:00Z",
+                        "end": "2026-09-15T00:00:00Z",
+                    },
+                    "prepaidBalance": {"val": 0},
+                    "onDemandCap": {"val": 0},
+                    "onDemandUsed": {"val": 0},
+                },
+            }
+        )
+        self.assertEqual(parsed["tierLabel"], "SuperGrok Plus")
+        self.assertEqual(len(parsed["limits"]), 1)
+        self.assertEqual(parsed["limits"][0]["label"], "Weekly")
+        self.assertAlmostEqual(parsed["limits"][0]["percent"], 0.125)
+        self.assertEqual(parsed["limits"][0]["resetsAt"], "2026-09-15T00:00:00Z")
+        self.assertIsNone(parsed["balance"])
+
+    def test_parse_billing_does_not_invent_zero_percent(self):
+        parsed = self.collector.parse_billing(
+            {
+                "subscription_tier_display": "SuperGrok Heavy",
+                "config": {
+                    "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "end": "2026-09-15T00:00:00Z"}
+                },
+            }
+        )
+        self.assertEqual(parsed["limits"], [])
+        self.assertEqual(parsed["tierLabel"], "SuperGrok Heavy")
+
+    def test_collect_limits_uses_grok_cli_and_skips_auth_json(self):
+        fake_dir = Path(self.temp_dir.name) / "bin"
+        fake_dir.mkdir()
+        fake = fake_dir / "grok"
+        fake.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/python3",
+                    "import json, sys",
+                    "while True:",
+                    "    line = sys.stdin.readline()",
+                    "    if not line:",
+                    "        break",
+                    "    line = line.strip()",
+                    "    if not line:",
+                    "        continue",
+                    "    msg = json.loads(line)",
+                    "    if 'id' not in msg:",
+                    "        continue",
+                    "    if msg.get('method') == 'initialize':",
+                    "        sys.stdout.write(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':{'protocolVersion':'0.1.0'}})+chr(10))",
+                    "        sys.stdout.flush()",
+                    "    elif msg.get('method') == '_x.ai/billing':",
+                    "        sys.stdout.write(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':{'subscription_tier':'SuperGrok','config':{'creditUsagePercent':20,'currentPeriod':{'type':'USAGE_PERIOD_TYPE_WEEKLY','end':'2026-09-20T00:00:00Z'}}}})+chr(10))",
+                    "        sys.stdout.flush()",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        os.environ["GROK_BIN"] = str(fake)
+        os.environ["PATH"] = str(fake_dir)
+        (self.grok_home / "auth.json").write_text('{"access_token":"do-not-read"}', encoding="utf-8")
+        source = (Path(__file__).parent / "grok-collector.py").read_text(encoding="utf-8")
+        self.assertNotIn(' / "auth.json"', source)
+        self.assertNotIn("cli-chat-proxy", source)
+        self.assertIn("_x.ai/billing", source)
+
+        limits = self.collector.collect_limits()
+
+        self.assertEqual(len(limits["limits"]), 1)
+        self.assertEqual(limits["limits"][0]["label"], "Weekly")
+        self.assertAlmostEqual(limits["limits"][0]["percent"], 0.2)
+        self.assertEqual(limits["limits"][0]["resetsAt"], "2026-09-20T00:00:00Z")
+        self.assertEqual(limits["usageStatusText"], "")
 
     def test_atomic_write_uses_standard_record_id(self):
         record = self.collector.empty_record("fixture")

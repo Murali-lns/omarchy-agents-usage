@@ -10,13 +10,13 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 - Normalizes provider limit records to show only windows actually supplied by upstream providers (session/5-hour, weekly, monthly, reset times, used/limit/remaining, and plan labels).
 - Shows a truthful "Limit unavailable / usage-only" status when a provider lacks a safe official quota source, preserving local usage metrics without fabricating quotas.
 - Collects Hermes TUI usage from the local `~/.hermes/state.db` database in read-only mode.
-- Collects Grok CLI usage from documented per-session `usage.json` files under `$GROK_HOME/sessions` (default `~/.grok/sessions`). If Omarchy later ships `omarchy-agent-usage-grok`, this plugin defers to that packaged collector and does not write `grok.json` itself.
+- Collects Grok CLI usage from documented per-session `usage.json` files under `$GROK_HOME/sessions` (default `~/.grok/sessions`). SuperGrok weekly/monthly reset meters come from the signed-in Grok CLI over ACP. If Omarchy later ships `omarchy-agent-usage-grok`, this plugin defers to that packaged collector and does not write `grok.json` itself.
 - Automatically discovers Hermes provider/subscription routes from recorded models and usage, grouping all models and metrics under safe route identities (such as OpenAI Codex, OpenCode Go, Grok API, Grok Subscription, Google Gemini, Anthropic, OpenRouter, and Nous). Hermes’ `xai-oauth` route remains distinct from the API-key `xai` route and is shown as **Grok Subscription**.
 - Keeps Hermes API transport modes (e.g., chat_completions, codex_responses, anthropic_messages) aggregated under their respective provider identities without splitting one identity. Distinct identities such as `xai` and `xai-oauth` remain separate.
 - Never infers subscriptions from model names alone (for example, grok-4.6 routed through OpenCode Go remains OpenCode Go).
 - Writes Hermes’ display record to the user’s local `~/.local/state/omarchy/agents/usage/hermes.json`.
 - Writes Grok’s display record to `~/.local/state/omarchy/agents/usage/grok.json` when the packaged Omarchy Grok collector is absent.
-- The Hermes and Grok collectors never read or send prompt text, message content, API keys, or credentials. The Grok collector does not call billing endpoints; weekly SuperGrok meters appear only when Omarchy’s official collector provides them.
+- The Hermes and Grok collectors never read or send prompt text, message content, API keys, or credentials. Grok SuperGrok weekly/monthly meters come from the Grok CLI (`grok agent --no-leader stdio`, `_x.ai/billing`); the collector does not read `auth.json` or call billing URLs itself.
 - Claude Code, Codex, and Fireworks records are collected through Omarchy’s existing provider tools.
 - Optional cross-device aggregation is off by default and is enabled only through the user’s explicit widget settings.
 

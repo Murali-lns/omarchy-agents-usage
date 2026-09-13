@@ -11,8 +11,11 @@ exits without writing so the official collector owns ``grok.json``.
 Otherwise it reads only Grok's documented per-session ``usage.json``
 files under ``$GROK_HOME/sessions`` (default ``~/.grok/sessions``) and
 the sibling ``summary.json`` session-kind field used to skip subagents.
-It never opens transcripts, chat history, prompts, credentials, or
-billing endpoints, and it never infers a subscription from a model name.
+Weekly/monthly SuperGrok meters come from the Grok CLI's own ACP method
+``_x.ai/billing`` over ``grok agent --no-leader stdio`` — the same
+boundary Codex uses. This collector never opens transcripts, chat
+history, prompts, or ``auth.json``, never calls billing URLs itself,
+and never infers a subscription from a model name.
 """
 
 from __future__ import annotations
@@ -23,8 +26,12 @@ import json
 import os
 from pathlib import Path
 import re
+import select
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 
 AGENT_ID = "grok"
@@ -75,6 +82,265 @@ def packaged_grok_collector() -> Path | None:
     if candidate.is_file() and os.access(candidate, os.X_OK):
         return candidate
     return None
+
+
+def runtime_env() -> dict[str, str]:
+    home = str(Path.home())
+    path_parts = [
+        os.environ.get("PATH", ""),
+        str(grok_home() / "bin"),
+        f"{home}/.local/bin",
+        f"{home}/.local/share/mise/shims",
+    ]
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join(part for part in path_parts if part)
+    env["GROK_HOME"] = str(grok_home())
+    return env
+
+
+def grok_command() -> str | None:
+    override = os.environ.get("GROK_BIN")
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    env = runtime_env()
+    found = shutil.which("grok", path=env.get("PATH"))
+    if found:
+        return found
+    for candidate in (grok_home() / "bin" / "grok", Path.home() / ".local" / "bin" / "grok"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def usage_percent(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return -1.0
+    if parsed != parsed or parsed < 0:
+        return -1.0
+    return min(1.0, parsed / 100.0)
+
+
+def money_cents(value: Any) -> float:
+    if isinstance(value, dict):
+        value = value.get("val", value.get("value", 0))
+    try:
+        amount = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if amount != amount:
+        return 0.0
+    return max(0.0, amount / 100.0)
+
+
+def display_label(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.split())
+    if not text or any(ord(char) < 32 for char in text) or len(text) > 128:
+        return ""
+    return text
+
+
+def plan_label(tier: str) -> str:
+    raw = str(tier or "").strip().replace("_", " ")
+    if not raw:
+        return ""
+    rest = raw[len("SuperGrok") :] if raw.startswith("SuperGrok") else ""
+    if raw.startswith("SuperGrok") and raw != "SuperGrok" and rest and " " not in rest:
+        return "SuperGrok " + rest
+    return raw
+
+
+def period_label(period_type: str) -> str:
+    text = str(period_type or "").upper()
+    if "MONTH" in text:
+        return "Monthly"
+    return "Weekly"
+
+
+def parse_billing(payload: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "limits": [],
+        "tierLabel": "",
+        "usageStatusText": "",
+        "authHelpText": "",
+        "balance": None,
+    }
+    if not isinstance(payload, dict):
+        return result
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else payload
+    if not isinstance(config, dict):
+        config = {}
+
+    percent = usage_percent(config.get("creditUsagePercent"))
+    period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}
+    reset = str((period or {}).get("end") or config.get("billingPeriodEnd") or "")
+    if percent >= 0:
+        result["limits"].append(
+            {
+                "label": period_label(str((period or {}).get("type") or "")),
+                "percent": percent,
+                "resetsAt": reset,
+            }
+        )
+
+    prepaid = money_cents(config.get("prepaidBalance"))
+    cap = money_cents(config.get("onDemandCap"))
+    spent = money_cents(config.get("onDemandUsed"))
+    remaining = prepaid + max(0.0, cap - spent)
+    funded = prepaid + cap
+    if remaining > 0 or funded > 0:
+        result["balance"] = {
+            "remaining": remaining,
+            "funded": funded,
+            "spent": spent,
+            "currency": "USD",
+        }
+
+    result["tierLabel"] = display_label(
+        payload.get("subscription_tier_display") or config.get("subscription_tier_display")
+    ) or plan_label(
+        str(
+            payload.get("subscriptionTier")
+            or config.get("subscriptionTier")
+            or payload.get("subscription_tier")
+            or config.get("subscription_tier")
+            or ""
+        )
+    )
+    return result
+
+
+def rpc_request(
+    proc: subprocess.Popen[str],
+    request_id: int,
+    method: str,
+    params: dict[str, Any] | None = None,
+    timeout: float = 12,
+) -> dict[str, Any]:
+    if proc.stdin is None or proc.stdout is None:
+        raise RuntimeError("Grok ACP stdio is closed")
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}) + "\n")
+    proc.stdin.flush()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ready, _, _ = select.select([proc.stdout], [], [], 0.25)
+        if not ready:
+            continue
+        line = proc.stdout.readline()
+        if not line:
+            break
+        try:
+            message = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(message, dict) and message.get("id") == request_id:
+            return message
+    raise TimeoutError(method)
+
+
+def rpc_notify(proc: subprocess.Popen[str], method: str, params: dict[str, Any] | None = None) -> None:
+    if proc.stdin is None:
+        raise RuntimeError("Grok ACP stdin is closed")
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method, "params": params or {}}) + "\n")
+    proc.stdin.flush()
+
+
+def collect_limits() -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "limits": [],
+        "tierLabel": "",
+        "usageStatusText": USAGE_STATUS,
+        "authHelpText": AUTH_HELP,
+        "balance": None,
+    }
+    grok = grok_command()
+    if not grok:
+        result["usageStatusText"] = "Grok unavailable"
+        return result
+
+    try:
+        proc = subprocess.Popen(
+            [grok, "agent", "--no-leader", "stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=runtime_env(),
+        )
+    except Exception:
+        result["usageStatusText"] = "Grok unavailable"
+        result["retryAdvised"] = True
+        return result
+
+    try:
+        rpc_request(
+            proc,
+            1,
+            "initialize",
+            {
+                "protocolVersion": "0.1.0",
+                "clientInfo": {"name": "omarchy-agents-usage", "version": "1"},
+                "capabilities": {},
+            },
+        )
+        rpc_notify(proc, "initialized")
+        message = rpc_request(proc, 2, "_x.ai/billing")
+        error = message.get("error")
+        if error:
+            code = error.get("code") if isinstance(error, dict) else None
+            text = str((error.get("message") if isinstance(error, dict) else error) or "")
+            lowered = text.lower()
+            if code in (401, 403) or any(
+                marker in lowered
+                for marker in ("unauthorized", "unauthenticated", "login", "expired", "sign-in", "sign in")
+            ):
+                result["usageStatusText"] = "Sign-in expired"
+                result["authHelpText"] = AUTH_HELP
+                return result
+            result["usageStatusText"] = USAGE_STATUS
+            result["authHelpText"] = AUTH_HELP
+            if code != -32601:
+                result["retryAdvised"] = True
+            return result
+        payload = message.get("result")
+        if not isinstance(payload, dict):
+            result["retryAdvised"] = True
+            return result
+        parsed = parse_billing(payload)
+        result.update(parsed)
+        if result.get("limits"):
+            result["usageStatusText"] = ""
+            result["authHelpText"] = ""
+        else:
+            result["usageStatusText"] = USAGE_STATUS
+            result["authHelpText"] = ""
+        return result
+    except TimeoutError:
+        result["usageStatusText"] = USAGE_STATUS
+        result["retryAdvised"] = True
+        return result
+    except Exception:
+        result["usageStatusText"] = USAGE_STATUS
+        result["retryAdvised"] = True
+        return result
+    finally:
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+            if proc.stdout:
+                proc.stdout.close()
+            proc.terminate()
+            proc.wait(timeout=1)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 def recent_date_strings(today_dt: datetime) -> list[str]:
@@ -411,6 +677,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     record = collect_usage()
+    limits = collect_limits()
+    record["limits"] = limits.get("limits") or []
+    record["tierLabel"] = limits.get("tierLabel") or ""
+    record["usageStatusText"] = limits.get("usageStatusText") or ""
+    record["authHelpText"] = limits.get("authHelpText") or ""
+    if limits.get("balance"):
+        record["balance"] = limits["balance"]
+    if limits.get("retryAdvised"):
+        record["retryAdvised"] = True
     usage_dir = usage_dir_path()
     try:
         atomic_write_record(usage_dir, record)
