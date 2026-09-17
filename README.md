@@ -18,7 +18,7 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 - Writes Grok’s display record to `~/.local/state/omarchy/agents/usage/grok.json` when the packaged Omarchy Grok collector is absent.
 - The Hermes and Grok collectors never read or send prompt text, message content, API keys, or credentials. Grok SuperGrok weekly/monthly meters come from the Grok CLI (`grok agent --no-leader stdio`, `_x.ai/billing`); the collector does not read `auth.json` or call billing URLs itself.
 - Claude Code, Codex, and Fireworks records are collected through Omarchy’s existing provider tools.
-- Optional cross-device aggregation is off by default and is enabled only through the user’s explicit widget settings.
+- Optional cross-device aggregation is off by default and is enabled only through the user’s explicit widget settings. Snapshot scans are bounded (at most 64 files, 256 KiB per file, 2 MiB per scan); oversized, empty, non-regular, and symlinked entries are skipped, and skipped or truncated input is reported in the panel instead of being loaded.
 
 The plugin runs with the user’s normal desktop permissions inside the Omarchy shell. Review the source before enabling it, as with every third-party Omarchy plugin.
 
@@ -84,7 +84,7 @@ omarchy-shell io.github.murali-lns.agents-usage refresh
 
 ## Privacy and data boundaries
 
-The Hermes collector reads only the active Hermes database path selected by `HERMES_HOME`, or `~/.hermes/state.db` when that variable is unset. It filters to TUI sessions and aggregates counts and token totals by model and discovered provider route. The model-history sidecar reads only standard Omarchy usage JSON records and stores bounded local period totals; it never opens a provider database or transcript. Route/subscription data remains local-only and is deliberately omitted from synced snapshots; synced aggregation contains provider-level count and model totals only. The repository contains no user database, generated usage JSON, shell configuration, cache, credential, API key, prompt, or message content.
+The Hermes collector reads only the active Hermes database path selected by `HERMES_HOME`, or `~/.hermes/state.db` when that variable is unset. It filters to TUI sessions and aggregates counts and token totals by model and discovered provider route. The model-history sidecar reads only standard Omarchy usage JSON records and stores bounded local period totals; it never opens a provider database or transcript. Route/subscription data remains local-only and is deliberately omitted from synced snapshots; synced aggregation contains provider-level count and model totals only. The cross-device scan helper reads at most 64 snapshot files of 256 KiB each within a 2 MiB per-scan budget, rejects symlinked and non-regular entries, and bounds every parsed array, key, string, and number before merging. The repository contains no user database, generated usage JSON, shell configuration, cache, credential, API key, prompt, or message content.
 
 ## License and attribution
 

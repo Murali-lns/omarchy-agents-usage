@@ -6,7 +6,8 @@ import Quickshell.Io
 // for packaged collectors; this plugin runs the Hermes collector, a Grok
 // collector that defers to Omarchy when `omarchy-agent-usage-grok` exists,
 // and the supplemental model-history phase. This file discovers standard records,
-// watches them, and merges optional snapshots synced from other machines.
+// watches them, and merges optional snapshots synced from other machines,
+// bounded by hard file-size, file-count, and entry-type limits.
 Item {
   id: root
   visible: false
@@ -492,6 +493,25 @@ Item {
   property string syncStatusText: ""
   property double aggregateUpdatedAtMs: aggregateData && aggregateData.updatedAtMs ? Number(aggregateData.updatedAtMs) : 0
 
+  // The sync-scan.sh helper enforces per-file, aggregate, and file-count
+  // limits before synced data reaches this process; the parse-side ceilings
+  // below are the defensive backstop for everything downstream of it.
+  readonly property string syncScanScriptPath: {
+    var resolved = Qt.resolvedUrl("sync-scan.sh").toString().replace(/^file:\/\//, "")
+    if (resolved && resolved.indexOf("/") !== -1) {
+      return resolved
+    }
+    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/sync-scan.sh"
+  }
+  readonly property int syncMaxScanChars: 2359296 // 2.25 MiB; helper budget plus separator overhead
+  readonly property int syncMaxSnapshots: 64
+  readonly property int syncMaxProvidersPerSnapshot: 32
+  readonly property int syncMaxKeysPerMap: 256
+  readonly property int syncMaxKeyLength: 128
+  readonly property int syncMaxActiveDates: 3660
+  readonly property int syncMaxStringLength: 80
+  readonly property double maxCountValue: 1e15
+
   onSyncEnabledChanged: syncSettingsChanged()
   onSyncDirChanged: syncSettingsChanged()
   onSyncFileNameChanged: if (syncConfigured()) scheduleSync()
@@ -534,7 +554,7 @@ Item {
 
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("agents/sync", text.trim())
+      onStreamFinished: if (text.trim() !== "") console.warn("agents/sync", text.trim().slice(0, 500))
     }
   }
 
@@ -649,8 +669,9 @@ Item {
       finishSyncRun()
       return
     }
-    var script = "dir=$0; [[ -d \"$dir\" ]] || exit 0; shopt -s nullglob; for f in \"$dir\"/*.json; do [[ -f \"$f\" ]] || continue; printf '===%s===\\n' \"$f\"; cat \"$f\"; printf '\\n=== EOM ===\\n'; done"
-    syncScanProcess.command = ["bash", "-c", script, root.syncEffectiveDir]
+    // sync-scan.sh reads the folder under hard size, count, and entry-type
+    // bounds, so StdioCollector below only ever buffers a bounded document.
+    syncScanProcess.command = ["bash", root.syncScanScriptPath, root.syncEffectiveDir]
     syncScanProcess.running = true
   }
 
@@ -689,22 +710,43 @@ Item {
   }
 
   function parseSyncScanOutput(output) {
-    var lines = String(output || "").split("\n")
+    var text = String(output || "")
+    var scanTruncated = false
+    if (text.length > root.syncMaxScanChars) {
+      text = text.substring(0, root.syncMaxScanChars)
+      scanTruncated = true
+    }
+    var lines = text.split("\n")
     var snapshots = []
     var currentPath = ""
     var currentJson = []
+    var meta = null
+    var droppedSnapshots = 0
 
     function flush() {
       if (currentPath === "") return
+      var path = currentPath
       var raw = currentJson.join("\n").trim()
-      try {
-        var parsed = JSON.parse(raw)
-        if (parsed && parsed.providers) snapshots.push(parsed)
-      } catch (e) {
-        console.warn("agents/sync", "Ignoring bad snapshot", currentPath, e)
-      }
       currentPath = ""
       currentJson = []
+      if (path.trim() === "sync-meta") {
+        try {
+          var parsedMeta = JSON.parse(raw)
+          if (isPlainObject(parsedMeta)) meta = parsedMeta
+        } catch (e) {
+        }
+        return
+      }
+      if (snapshots.length >= root.syncMaxSnapshots) {
+        droppedSnapshots++
+        return
+      }
+      try {
+        var parsed = JSON.parse(raw)
+        if (isPlainObject(parsed) && isPlainObject(parsed.providers)) snapshots.push(parsed)
+      } catch (e) {
+        console.warn("agents/sync", "Ignoring bad snapshot", String(path).slice(0, root.syncMaxStringLength), String(e).slice(0, 200))
+      }
     }
 
     for (var i = 0; i < lines.length; i++) {
@@ -725,8 +767,20 @@ Item {
     flush()
 
     aggregateData = aggregateSnapshots(snapshots)
-    syncStatusText = ""
+    syncStatusText = syncInputNotice(meta, scanTruncated, droppedSnapshots)
     syncRevision++
+  }
+
+  // Skipped or truncated sync input is surfaced in the panel instead of
+  // being silently dropped.
+  function syncInputNotice(meta, scanTruncated, droppedSnapshots) {
+    var parts = []
+    var skipped = meta ? numberValue(meta.skipped) : 0
+    var truncated = !!meta && Number(meta.truncated) === 1
+    if (skipped > 0) parts.push("skipped " + skipped + " oversized or invalid " + (skipped === 1 ? "entry" : "entries"))
+    if (truncated || scanTruncated) parts.push("input truncated at safety limits")
+    if (droppedSnapshots > 0) parts.push("kept the first " + root.syncMaxSnapshots + " snapshots")
+    return parts.length > 0 ? "Usage sync: " + parts.join("; ") : ""
   }
 
   function cloneValue(value, fallback) {
@@ -750,18 +804,15 @@ Item {
   // Only token fields count here; quota fields such as percent/remaining never
   // become usage totals.
   function modelUsageValueTotal(value) {
-    if (!isPlainObject(value)) {
-      var scalar = Number(value)
-      return isFinite(scalar) && scalar > 0 ? scalar : 0
-    }
+    if (!isPlainObject(value)) return boundedNumber(value)
     var total = 0
-    total += Math.max(0, Number(value.inputTokens) || 0)
-    total += Math.max(0, Number(value.outputTokens) || 0)
-    total += Math.max(0, Number(value.cacheReadInputTokens) || 0)
-    total += Math.max(0, Number(value.cacheCreationInputTokens) || 0)
+    total += boundedNumber(value.inputTokens)
+    total += boundedNumber(value.outputTokens)
+    total += boundedNumber(value.cacheReadInputTokens)
+    total += boundedNumber(value.cacheCreationInputTokens)
     if (total === 0 && value.totalTokens !== undefined)
-      total = Math.max(0, Number(value.totalTokens) || 0)
-    return isFinite(total) ? total : 0
+      total = boundedNumber(value.totalTokens)
+    return Math.min(Math.round(total), root.maxCountValue)
   }
 
   function modelUsageByPeriodHasData(periods) {
@@ -816,6 +867,8 @@ Item {
       var targetPeriod = target[period]
       var sourcePeriod = source[period]
       for (var modelId in sourcePeriod) {
+        if (String(modelId).length > root.syncMaxKeyLength) continue
+        if (targetPeriod[modelId] === undefined && Object.keys(targetPeriod).length >= root.syncMaxKeysPerMap) continue
         targetPeriod[modelId] = combineModelUsageValue(additive, targetPeriod[modelId], sourcePeriod[modelId])
       }
     }
@@ -837,9 +890,16 @@ Item {
     return result
   }
 
+  // Raw numbers from local records and synced snapshots are clamped to a
+  // sane range before they influence totals or display.
+  function boundedNumber(raw) {
+    var n = Number(raw)
+    if (!isFinite(n) || n < 0) return 0
+    return n > root.maxCountValue ? root.maxCountValue : n
+  }
+
   function numberValue(value) {
-    var n = Number(value || 0)
-    return isFinite(n) ? Math.round(n) : 0
+    return Math.round(boundedNumber(value || 0))
   }
 
   function dateString(date) {
@@ -872,17 +932,27 @@ Item {
   }
 
   function combineObjectNumbers(additive, target, source) {
-    if (!source) return
-    for (var key in source) target[key] = combineNumber(additive, target[key], source[key])
+    if (!isPlainObject(source)) return
+    var keys = Object.keys(target)
+    for (var key in source) {
+      if (target[key] === undefined) {
+        if (keys.length >= root.syncMaxKeysPerMap || String(key).length > root.syncMaxKeyLength) continue
+        keys.push(key)
+      }
+      target[key] = combineNumber(additive, target[key], source[key])
+    }
   }
 
   function aggregateSnapshots(snapshots) {
     var dates = recentDateStrings()
     var devices = {}
     var providers = {}
+    var providerCount = 0
 
     function providerAcc(id) {
       if (providers[id]) return providers[id]
+      if (providerCount >= root.syncMaxProvidersPerSnapshot) return null
+      providerCount++
       var recentByDay = {}
       for (var d = 0; d < dates.length; d++) recentByDay[dates[d]] = 0
       providers[id] = {
@@ -916,8 +986,9 @@ Item {
         if (root.isRetiredProviderId(providerId)) continue
         var stats = snapshotProviders[providerId] || {}
         var acc = providerAcc(providerId)
+        if (!acc) continue
         acc.devices[device] = true
-        if (stats.providerName && acc.providerName === "") acc.providerName = String(stats.providerName)
+        if (stats.providerName && acc.providerName === "") acc.providerName = String(stats.providerName).slice(0, root.syncMaxStringLength)
         acc.ready = acc.ready || stats.ready === true
         acc.hasLocalStats = acc.hasLocalStats || stats.hasLocalStats !== false
         // Snapshots from before the field existed only came from agents that
@@ -933,7 +1004,8 @@ Item {
         // summing counts. Snapshots written before activeDates existed only
         // carry a count; the widest one stands in for them.
         var activeDates = Array.isArray(stats.activeDates) ? stats.activeDates : []
-        for (var ad = 0; ad < activeDates.length; ad++) acc.activeDates[String(activeDates[ad])] = true
+        for (var ad = 0; ad < activeDates.length && ad < root.syncMaxActiveDates; ad++)
+          acc.activeDates[String(activeDates[ad]).slice(0, 32)] = true
         acc.activeDays = Math.max(acc.activeDays, numberValue(stats.activeDays))
         combineObjectNumbers(additive, acc.todayTokensByModel, stats.todayTokensByModel || {})
 
@@ -947,8 +1019,12 @@ Item {
 
         var usage = stats.modelUsage || {}
         for (var modelId in usage) {
+          if (String(modelId).length > root.syncMaxKeyLength) continue
           var bucket = acc.modelUsage[modelId]
-          if (!bucket) bucket = acc.modelUsage[modelId] = emptyTokenBucket()
+          if (!bucket) {
+            if (Object.keys(acc.modelUsage).length >= root.syncMaxKeysPerMap) continue
+            bucket = acc.modelUsage[modelId] = emptyTokenBucket()
+          }
           combineObjectNumbers(additive, bucket, usage[modelId] || {})
         }
         combineModelUsageByPeriod(additive, acc.modelUsageByPeriod, stats.modelUsageByPeriod || {})
