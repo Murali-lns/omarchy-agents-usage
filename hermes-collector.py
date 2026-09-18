@@ -373,7 +373,15 @@ def collect_usage() -> dict[str, Any]:
         provider_col = "smu.billing_provider" if has_billing_provider else "NULL"
         mode_col = "smu.billing_mode" if has_billing_mode else "NULL"
 
-        source_filter = "tui"
+        # Day bucketing prefers last_seen (day of most recent activity) so
+        # long-lived sessions report on days they actually ran; falls back to
+        # first_seen when column/timestamp is absent.
+        has_last_seen = "last_seen" in smu_cols
+        day_expr = (
+            "COALESCE(smu.last_seen, smu.first_seen, s.started_at)"
+            if has_last_seen
+            else "COALESCE(smu.first_seen, s.started_at)"
+        )
 
         cur.execute(
             f"""
@@ -385,14 +393,14 @@ def collect_usage() -> dict[str, Any]:
                 COALESCE(smu.output_tokens, 0),
                 COALESCE(smu.cache_read_tokens, 0),
                 COALESCE(smu.cache_write_tokens, 0),
-                strftime('%Y-%m-%d', COALESCE(smu.first_seen, s.started_at), 'unixepoch', 'localtime') AS day,
+                strftime('%Y-%m-%d', {day_expr}, 'unixepoch', 'localtime') AS day,
                 {provider_col} AS raw_provider,
                 {mode_col} AS raw_mode
             FROM session_model_usage smu
             JOIN sessions s ON smu.session_id = s.id
-            WHERE s.source = ?
+            WHERE s.source IN (?, ?)
             """,
-            (source_filter,),
+            ("tui", "desktop"),
         )
         rows = cur.fetchall()
 
