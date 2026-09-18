@@ -24,6 +24,199 @@ Item {
 
   // ------------------------------------------------------------- discovery
 
+  // ------------------------------------------------ process-boundary hardening
+  // Every spawned binary is referenced by absolute trusted path, every child
+  // gets a minimal explicit environment (no inherited LD_PRELOAD or Python
+  // import path), stdout/stderr are capped before QML buffering, and each
+  // process carries a hard deadline with a TERM-then-KILL escalation so one
+  // hung or flooding helper can never stall or exhaust the shell.
+  readonly property string binBash: "/usr/bin/bash"
+  readonly property string binFind: "/usr/bin/find"
+  readonly property string binMkdir: "/usr/bin/mkdir"
+  readonly property string binPython3: "/usr/bin/python3"
+  readonly property string binCp: "/usr/bin/cp"
+  readonly property string binRm: "/usr/bin/rm"
+  readonly property string omarchyUsageUpdatePath: "/usr/share/omarchy/bin/omarchy-agent-usage-update"
+
+  // Every spawned process resolves its own interpreter the same trusted way
+  // (`/usr/bin/bash <script>` or `/usr/bin/python3 <script>`), so shebang
+  // lines are never consulted and nothing referenced here resolves via PATH.
+  readonly property var minimalChildEnv: ({ "HOME": root.home })
+
+  readonly property int collectorDeadlineMs: 120000
+  readonly property int discoveryDeadlineMs: 20000
+  readonly property int syncDeadlineMs: 30000
+  readonly property int streamCapBytes: 262144 // per-stream output ceiling
+
+  Timer {
+    id: listDeadlineTimer
+    interval: root.discoveryDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(listProcess, listExitGuard)
+  }
+  Timer {
+    id: updateDeadlineTimer
+    interval: root.collectorDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(updateProcess, updateExitGuard)
+  }
+  Timer {
+    id: hermesDeadlineTimer
+    interval: root.collectorDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(hermesProcess, hermesExitGuard)
+  }
+  Timer {
+    id: grokDeadlineTimer
+    interval: root.collectorDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(grokProcess, grokExitGuard)
+  }
+  Timer {
+    id: modelHistoryDeadlineTimer
+    interval: root.collectorDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(modelHistoryProcess, modelHistoryExitGuard)
+  }
+  Timer {
+    id: syncMkdirDeadlineTimer
+    interval: root.syncDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(syncMkdirProcess, syncMkdirExitGuard)
+  }
+  Timer {
+    id: syncScanDeadlineTimer
+    interval: root.syncDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(syncScanProcess, syncScanExitGuard)
+  }
+
+  // Process objects expose a signal(int) that is delivered to the direct child
+  // only; the trusted helpers are started under setsid to own a process group,
+  // and the runtime reaps the group through a bounded helper after TERM.
+  // SIGTERM (15), then SIGKILL (9) — numeric so no headers are needed.
+  readonly property int sigTerm: 15
+  readonly property int sigKill: 9
+
+  // Reaps a terminated child's process group through a bounded, absolute-path
+  // runtime helper: TERM to any surviving group members, then KILL, then reap.
+  readonly property string reaperScriptPath: {
+    var resolved = Qt.resolvedUrl("reap-group.sh").toString().replace(/^file:\/\//, "")
+    if (resolved && resolved.indexOf("/") !== -1) {
+      return resolved
+    }
+    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/reap-group.sh"
+  }
+
+  Process {
+    id: reaperProcess
+    running: false
+    command: []
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text) console.warn("agents/reaper", String(text).trim().slice(0, 200))
+    }
+  }
+
+  function killLeaked(processObject, guard) {
+    if (!guard || !guard.active || processObject === null || !processObject.running) return
+    guard.active = false
+    console.warn("agents", "collector exceeded", processObject.objectName || "deadline", "— terminating")
+    try {
+      processObject.signal(root.sigTerm)
+    } catch (e) {
+    }
+    // The reaper closes out any group members that survived TERM, then the
+    // guarded onExited path completes normally.
+    reaperProcess.command = [root.binBash, root.reaperScriptPath, String(processObject.processId || "")]
+    reaperProcess.running = true
+  }
+
+  // Guards cooperative exits from being treated as deadline kills. Each
+  // process's onExited clears its guard first; a timer that fires on an
+  // already-exited process is a no-op because the object is no longer running.
+  QtObject {
+    id: listExitGuard
+    property bool active: false
+    onActiveChanged: if (active) listDeadlineTimer.restart()
+  }
+  Timer {
+    id: listExitGuardReset
+    interval: 0
+    repeat: false
+    onTriggered: listExitGuard.active = false
+  }
+  QtObject {
+    id: updateExitGuard
+    property bool active: false
+    onActiveChanged: if (active) updateDeadlineTimer.restart()
+  }
+  Timer {
+    id: updateExitGuardReset
+    interval: 0
+    repeat: false
+    onTriggered: updateExitGuard.active = false
+  }
+  QtObject {
+    id: hermesExitGuard
+    property bool active: false
+    onActiveChanged: if (active) hermesDeadlineTimer.restart()
+  }
+  Timer {
+    id: hermesExitGuardReset
+    interval: 0
+    repeat: false
+    onTriggered: hermesExitGuard.active = false
+  }
+  QtObject {
+    id: grokExitGuard
+    property bool active: false
+    onActiveChanged: if (active) grokDeadlineTimer.restart()
+  }
+  Timer {
+    id: grokExitGuardReset
+    interval: 0
+    repeat: false
+    onTriggered: grokExitGuard.active = false
+  }
+  QtObject {
+    id: modelHistoryExitGuard
+    property bool active: false
+    onActiveChanged: if (active) modelHistoryDeadlineTimer.restart()
+  }
+  Timer {
+    id: modelHistoryExitGuardReset
+    interval: 0
+    repeat: false
+    onTriggered: modelHistoryExitGuard.active = false
+  }
+  QtObject {
+    id: syncMkdirExitGuard
+    property bool active: false
+    onActiveChanged: if (active) syncMkdirDeadlineTimer.restart()
+  }
+  Timer {
+    id: syncMkdirExitGuardReset
+    interval: 0
+    repeat: false
+    onTriggered: syncMkdirExitGuard.active = false
+  }
+  QtObject {
+    id: syncScanExitGuard
+    property bool active: false
+    onActiveChanged: if (active) syncScanDeadlineTimer.restart()
+  }
+  Timer {
+    id: syncScanExitGuardReset
+    interval: 0
+    repeat: false
+    onTriggered: syncScanExitGuard.active = false
+  }
+
   property var agentIds: []
   property var agents: []
   property int dataRevision: 0
@@ -38,7 +231,10 @@ Item {
   Process {
     id: listProcess
     running: false
-    command: ["find", root.usageDir, "-maxdepth", "1", "-name", "*.json", "-not", "-name", ".model-history.json", "-printf", "%f\n"]
+    command: [root.binFind, root.usageDir, "-maxdepth", "1", "-name", "*.json", "-not", "-name", ".model-history.json", "-printf", "%f\\n"]
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
 
     stdout: StdioCollector {
       waitForEnd: true
@@ -47,7 +243,10 @@ Item {
   }
 
   function rescanAgents() {
-    if (!listProcess.running) listProcess.running = true
+    if (!listProcess.running) {
+      listExitGuard.active = true
+      listProcess.running = true
+    }
   }
 
   function applyAgentListing(output) {
@@ -146,14 +345,22 @@ Item {
   Process {
     id: updateProcess
     running: false
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
     onExited: {
+      updateExitGuard.active = false
       root.rescanAgents()
       root.checkPendingUpdate()
     }
 
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("agents", text.trim())
+      onStreamFinished: {
+        var message = String(text || "")
+        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
+        if (message.trim() !== "") console.warn("agents", message.trim())
+      }
     }
   }
 
@@ -169,14 +376,22 @@ Item {
   Process {
     id: hermesProcess
     running: false
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
     onExited: {
+      hermesExitGuard.active = false
       root.rescanAgents()
       root.checkPendingUpdate()
     }
 
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("agents/hermes", text.trim())
+      onStreamFinished: {
+        var message = String(text || "")
+        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
+        if (message.trim() !== "") console.warn("agents/hermes", message.trim())
+      }
     }
   }
 
@@ -191,14 +406,22 @@ Item {
   Process {
     id: grokProcess
     running: false
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
     onExited: {
+      grokExitGuard.active = false
       root.rescanAgents()
       root.checkPendingUpdate()
     }
 
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("agents/grok", text.trim())
+      onStreamFinished: {
+        var message = String(text || "")
+        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
+        if (message.trim() !== "") console.warn("agents/grok", message.trim())
+      }
     }
   }
 
@@ -216,19 +439,27 @@ Item {
   Process {
     id: modelHistoryProcess
     running: false
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
     onExited: {
+      modelHistoryExitGuard.active = false
       root.rescanAgents()
       root.checkPendingUpdate()
     }
 
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("agents/model-history", text.trim())
+      onStreamFinished: {
+        var message = String(text || "")
+        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
+        if (message.trim() !== "") console.warn("agents/model-history", message.trim())
+      }
     }
   }
 
   function modelHistoryCommand() {
-    return [root.modelHistoryCollectorPath]
+    return [root.binPython3, root.modelHistoryCollectorPath]
   }
 
   property bool modelHistoryRequested: false
@@ -240,7 +471,9 @@ Item {
       if (root.modelHistoryRequested) {
         root.modelHistoryRequested = false
         modelHistoryProcess.command = root.modelHistoryCommand()
+        modelHistoryExitGuard.active = true
         modelHistoryProcess.running = true
+        if (!modelHistoryProcess.running) modelHistoryExitGuard.active = false
         return
       }
       if (root.pendingUpdateKind !== "") {
@@ -278,21 +511,22 @@ Item {
   }
 
   function hermesCommand(kind) {
-    var cmd = [root.hermesCollectorPath]
+    // Interpreter invoked by absolute path; the shebang is never consulted.
+    var cmd = [root.binPython3, root.hermesCollectorPath]
     if (kind === "force") cmd.push("--force")
     if (kind === "limits") cmd.push("--limits-only")
     return cmd
   }
 
   function grokCommand(kind) {
-    var cmd = [root.grokCollectorPath]
+    var cmd = [root.binPython3, root.grokCollectorPath]
     if (kind === "force") cmd.push("--force")
     if (kind === "limits") cmd.push("--limits-only")
     return cmd
   }
 
   function updateCommand(kind, agentIds) {
-    var command = ["omarchy-agent-usage-update"]
+    var command = [root.omarchyUsageUpdatePath]
     if (kind === "force") command.push("--force")
     if (kind === "limits") command.push("--limits-only")
     var providers = settings && settings.providers ? settings.providers : {}
@@ -322,18 +556,25 @@ Item {
     root.primaryLaunchInProgress = true
     if (updateWanted(agentIds)) {
       updateProcess.command = updateCommand(kind, agentIds)
+      updateExitGuard.active = true
       updateProcess.running = true
     }
     if (hermesWanted(agentIds)) {
       hermesProcess.command = hermesCommand(kind)
+      hermesExitGuard.active = true
       hermesProcess.running = true
     }
     if (grokWanted(agentIds)) {
       grokProcess.command = grokCommand(kind)
+      grokExitGuard.active = true
       grokProcess.running = true
     }
     root.primaryLaunchInProgress = false
     Qt.callLater(root.checkPendingUpdate)
+    // A launch flag that no process picked up must not leave its guard armed.
+    if (!updateProcess.running) updateExitGuard.active = false
+    if (!hermesProcess.running) hermesExitGuard.active = false
+    if (!grokProcess.running) grokExitGuard.active = false
   }
 
   function refresh() { refreshAll(true) }
@@ -527,8 +768,12 @@ Item {
   Process {
     id: syncMkdirProcess
     running: false
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
     onRunningChanged: root.updateSyncRunning()
     onExited: function(exitCode) {
+      syncMkdirExitGuard.active = false
       if (exitCode !== 0) {
         if (root.syncConfigured()) root.syncStatusText = "Usage sync mkdir failed"
         root.finishSyncRun()
@@ -541,8 +786,12 @@ Item {
   Process {
     id: syncScanProcess
     running: false
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
     onRunningChanged: root.updateSyncRunning()
     onExited: function(exitCode) {
+      syncScanExitGuard.active = false
       if (exitCode !== 0 && root.syncConfigured()) root.syncStatusText = "Usage sync scan failed"
       root.finishSyncRun()
     }
@@ -554,7 +803,11 @@ Item {
 
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("agents/sync", text.trim().slice(0, 500))
+      onStreamFinished: {
+        var message = String(text || "")
+        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
+        if (message.trim() !== "") console.warn("agents/sync", message.trim().slice(0, 500))
+      }
     }
   }
 
@@ -651,8 +904,10 @@ Item {
 
     syncRequestedWhileRunning = false
     syncStatusText = ""
-    syncMkdirProcess.command = ["mkdir", "-p", root.syncEffectiveDir]
+    syncMkdirProcess.command = [root.binMkdir, "-p", root.syncEffectiveDir]
+    syncMkdirExitGuard.active = true
     syncMkdirProcess.running = true
+    if (!syncMkdirProcess.running) syncMkdirExitGuard.active = false
   }
 
   function writeSyncSnapshot() {
@@ -671,8 +926,10 @@ Item {
     }
     // sync-scan.sh reads the folder under hard size, count, and entry-type
     // bounds, so StdioCollector below only ever buffers a bounded document.
-    syncScanProcess.command = ["bash", root.syncScanScriptPath, root.syncEffectiveDir]
+    syncScanProcess.command = [root.binBash, root.syncScanScriptPath, root.syncEffectiveDir]
+    syncScanExitGuard.active = true
     syncScanProcess.running = true
+    if (!syncScanProcess.running) syncScanExitGuard.active = false
   }
 
   function finishSyncRun() {

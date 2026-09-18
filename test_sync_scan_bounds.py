@@ -80,7 +80,8 @@ class TestSyncScanHelper(unittest.TestCase):
         self.assertIn("max_file_bytes=262144", text)
         self.assertIn("max_total_bytes=2097152", text)
         self.assertIn('[[ -L "$f" || ! -f "$f" ]]', text)
-        self.assertIn('head -c "$size"', text)
+        self.assertIn('head_bin=/usr/bin/head', text)
+        self.assertIn('"$head_bin" -c "$size"', text)
 
     def test_small_files_are_kept_and_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,6 +167,82 @@ class TestSyncScanHelper(unittest.TestCase):
         self.assertEqual((meta["kept"], meta["skipped"], meta["truncated"], meta["bytes"]), (0, 0, 0, 0))
 
 
+class TestQmlProcessBoundary(unittest.TestCase):
+    """Pins the marketplace process-boundary requirements.
+
+    Absolute trusted binaries, cleared child environments, capped
+    stdout/stderr, hard deadlines with TERM-then-KILL via a bounded reaper.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main = MAIN_PATH.read_text(encoding="utf-8")
+
+    def test_no_path_resolved_commands(self):
+        for needle in (
+            'command: ["find"',
+            '["bash", root',
+            '["mkdir"',
+            '["omarchy-agent-usage-update"]',
+            "[root.hermesCollectorPath]",
+            "[root.grokCollectorPath]",
+            "[root.modelHistoryCollectorPath]",
+        ):
+            self.assertNotIn(needle, self.main)
+
+    def test_absolute_trusted_binaries(self):
+        for needle in (
+            'readonly property string binBash: "/usr/bin/bash"',
+            'readonly property string binFind: "/usr/bin/find"',
+            'readonly property string binMkdir: "/usr/bin/mkdir"',
+            'readonly property string binPython3: "/usr/bin/python3"',
+            'omarchyUsageUpdatePath: "/usr/share/omarchy/bin/omarchy-agent-usage-update"',
+        ):
+            self.assertIn(needle, self.main)
+
+    def test_collectors_started_through_absolute_interpreter(self):
+        self.assertIn("[root.binPython3, root.hermesCollectorPath]", self.main)
+        self.assertIn("[root.binPython3, root.grokCollectorPath]", self.main)
+        self.assertIn("[root.binPython3, root.modelHistoryCollectorPath]", self.main)
+        self.assertIn("syncScanProcess.command = [root.binBash", self.main)
+
+    def test_minimal_explicit_environment(self):
+        self.assertIn("clearEnvironment: true", self.main)
+        self.assertIn('minimalChildEnv: ({ "HOME": root.home })', self.main)
+        spawns = self.main.count("Process {")
+        cleared = self.main.count("clearEnvironment: true")
+        self.assertEqual(cleared, spawns)
+
+    def test_stream_output_is_capped(self):
+        self.assertIn("readonly property int streamCapBytes:", self.main)
+        self.assertGreaterEqual(self.main.count("streamCapBytes)"), 5)
+
+    def test_deadlines_and_group_reaper_exist(self):
+        self.assertIn("readonly property int collectorDeadlineMs:", self.main)
+        self.assertIn("readonly property int discoveryDeadlineMs:", self.main)
+        self.assertIn("readonly property int syncDeadlineMs:", self.main)
+        self.assertIn("function killLeaked(processObject, guard)", self.main)
+        for name in ("updateProcess", "hermesProcess", "grokProcess",
+                     "modelHistoryProcess", "listProcess", "syncMkdirProcess",
+                     "syncScanProcess"):
+            self.assertIn("killLeaked(" + name + ",", self.main)
+
+    def test_reaper_helper_is_bounded_and_absolute(self):
+        helper = ROOT / "reap-group.sh"
+        text = helper.read_text(encoding="utf-8")
+        self.assertIn("#!/bin/bash", text)
+        self.assertIn("kill -0", text)
+        self.assertIn("kill -KILL", text)
+        self.assertNotIn("PATH=", text)
+        self.assertTrue(os.access(helper, os.X_OK))
+
+    def test_sync_scan_helper_avoids_path_resolution(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("stat_bin=/usr/bin/stat", text)
+        self.assertIn("head_bin=/usr/bin/head", text)
+        self.assertLessEqual(text.count("/usr/bin/"), 3)
+        self.assertNotIn("$(stat ", text)
+
 class TestQmlSyncConsumers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -179,7 +256,7 @@ class TestQmlSyncConsumers(unittest.TestCase):
 
     def test_scan_runs_the_bounded_helper_not_an_inline_cat(self):
         self.assertIn("sync-scan.sh", self.main)
-        self.assertIn('syncScanProcess.command = ["bash", root.syncScanScriptPath, root.syncEffectiveDir]', self.main)
+        self.assertIn('syncScanProcess.command = [root.binBash, root.syncScanScriptPath, root.syncEffectiveDir]', self.main)
         self.assertNotIn('cat \\"$f\\"', self.main)
 
     def test_parse_side_caps_bound_the_scan_document(self):

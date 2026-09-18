@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Bounded cross-device sync scan for the AI Agents Usage plugin.
 #
 # Emits one already-bounded stream: per-file, aggregate, and file-count
@@ -8,6 +8,10 @@
 # kept/skipped/truncated counts. Reads are capped with `head -c` at the
 # checked size, so a file that grows after the size check cannot exceed
 # its budget either.
+#
+# Started by Main.qml as `/usr/bin/bash sync-scan.sh <dir>` with a cleared
+# environment; the shebang is never consulted. PATH is not trusted here —
+# the two external tools this helper needs are pinned to absolute paths.
 set -u
 
 dir=${1:-}
@@ -23,13 +27,16 @@ skipped=0
 total=0
 truncated=0
 
+stat_bin=/usr/bin/stat
+head_bin=/usr/bin/head
+
 for f in "$dir"/*.json; do
   case $f in *$'\n'*) skipped=$((skipped + 1)); continue ;; esac
   if [[ -L "$f" || ! -f "$f" ]]; then
     skipped=$((skipped + 1))
     continue
   fi
-  size=$(stat -c %s -- "$f" 2>/dev/null) || { skipped=$((skipped + 1)); continue; }
+  size=$("$stat_bin" -c %s -- "$f" 2>/dev/null) || { skipped=$((skipped + 1)); continue; }
   case $size in ''|*[!0-9]*) skipped=$((skipped + 1)); continue ;; esac
   if (( size == 0 || size > max_file_bytes )); then
     skipped=$((skipped + 1))
@@ -46,7 +53,13 @@ for f in "$dir"/*.json; do
   total=$((total + size))
   kept=$((kept + 1))
   printf '===%s===\n' "$f"
-  head -c "$size" -- "$f"
+  # Skip the size re-check if head fails: a missing file raced a delete.
+  if ! "$head_bin" -c "$size" -- "$f" 2>/dev/null; then
+    skipped=$((skipped + 1))
+    kept=$((kept - 1))
+    total=$((total - size))
+    continue
+  fi
   printf '\n=== EOM ===\n'
 done
 
