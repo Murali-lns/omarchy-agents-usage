@@ -308,6 +308,36 @@ Panel {
     return peak
   }
 
+  // The Today card reads the authoritative current-day bucket; records that
+  // never published one fall back to the day's own observed bucket, never to
+  // a prorated cumulative total.
+  function todayTokenTotal(source) {
+    if (!source) return 0
+    var total = root.safeTokenNumber(source.todayTotalTokens)
+    if (total > 0) return total
+    var days = source.recentDays || []
+    var today = root.todayDate()
+    for (var i = 0; i < days.length; i++) {
+      if (String(days[i].date || "") === today) return root.safeTokenNumber(days[i].messageCount)
+    }
+    return 0
+  }
+
+  // The Last 7 Days card sums the same observed daily buckets the chart
+  // draws; it never prorates or rescales a cumulative total.
+  function weekTokenTotal(days) {
+    var total = 0
+    var list = days || []
+    for (var i = 0; i < list.length; i++) total += root.safeTokenNumber(list[i].messageCount)
+    return total
+  }
+
+  function dayOfMonth(date) {
+    var parsed = new Date(String(date || "") + "T00:00:00")
+    if (isNaN(parsed.getTime())) return ""
+    return String(parsed.getDate())
+  }
+
   function validModelPeriod(id) {
     return id === "today" || id === "7d" || id === "month" || id === "all"
   }
@@ -927,37 +957,84 @@ Panel {
 
           Column {
             id: usageSection
-            readonly property var days: {
-              if (root.provider && root.provider.providerId === "hermes" && root.selectedHermesRoute) {
-                return root.selectedHermesRoute.recentDays || []
-              }
-              return root.provider ? (root.provider.recentDays || []) : []
-            }
+            readonly property var source: root.activeHermesSource
+            readonly property var days: source ? (source.recentDays || []) : []
             readonly property real peak: Math.max(1, root.weekPeak(root.provider))
+            readonly property real todayTokens: root.todayTokenTotal(source)
+            readonly property real weekTokens: root.weekTokenTotal(days)
             visible: !!root.provider && days.length > 0
             width: parent.width
             spacing: Style.spacing.md
 
-            PanelSectionHeader {
+            // Period cards: today carries the accent fill so the current day
+            // reads first; the seven-day total sits quieter beside it.
+            Row {
+              id: usageCards
               width: parent.width
-              text: "TOKENS BY DAY"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
+              spacing: Style.spacing.lg
+
+              readonly property real cardWidth: (width - spacing) / 2
+
+              UsageCard {
+                width: usageCards.cardWidth
+                title: "Today"
+                value: usageSection.todayTokens
+                highlighted: true
+              }
+
+              UsageCard {
+                width: usageCards.cardWidth
+                title: "Last 7 Days"
+                value: usageSection.weekTokens
+                highlighted: false
+              }
             }
 
-            Repeater {
-              model: usageSection.days
+            // Daily activity: one column per day, scaled to the week's peak.
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(dailyActivityHeader.implicitHeight, dailyActivitySpan.implicitHeight)
 
-              DayRow {
-                required property var modelData
-                required property int index
+              PanelSectionHeader {
+                id: dailyActivityHeader
+                text: "DAILY ACTIVITY"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
 
-                width: usageSection.width
-                day: modelData
-                ratio: Number(modelData.messageCount || 0) / usageSection.peak
-                // By date, not by position: the Claude stats-cache fallback can
-                // hand us a window that stops short of today.
-                today: String(modelData.date || "") === root.todayDate()
+              Text {
+                id: dailyActivitySpan
+                textFormat: Text.PlainText
+                text: usageSection.days.length + " days"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            Row {
+              id: dailyActivityChart
+              width: parent.width
+              spacing: 0
+
+              Repeater {
+                model: usageSection.days
+
+                DayColumn {
+                  required property var modelData
+                  required property int index
+
+                  width: dailyActivityChart.width / Math.max(1, usageSection.days.length)
+                  day: modelData
+                  peak: usageSection.peak
+                  // By date, not by position: the Claude stats-cache fallback
+                  // can hand us a window that stops short of today.
+                  today: String(modelData.date || "") === root.todayDate()
+                }
               }
             }
           }
@@ -1164,66 +1241,160 @@ Panel {
 
   }
 
-  // One row per day: label, bar, tokens. Today is picked out in full
-  // foreground so the week reads as a run-up to right now.
-  component DayRow: Item {
-    id: dayRow
-    property var day: null
-    property real ratio: 0
-    property bool today: false
+  // A period summary card: period title, token caption, the total, and the
+  // observed-subtotal note. Today carries the accent fill so the current
+  // period reads first; Last 7 Days stays quiet.
+  component UsageCard: BorderSurface {
+    id: usageCard
+    property string title: ""
+    property real value: 0
+    property bool highlighted: false
 
-    implicitHeight: Math.max(dayLabel.implicitHeight, dayValue.implicitHeight) + Style.spacing.sm
+    implicitHeight: cardBody.implicitHeight + Style.spacing.xl * 2
+    color: usageCard.highlighted ? root.track : root.alpha(root.foreground, 0.05)
+    borderSpec: Border.flat(usageCard.highlighted
+      ? root.alpha(root.foreground, 0.28)
+      : root.alpha(root.foreground, 0.14), 1)
+    radius: Style.cornerRadius
 
-    Text {
-      id: dayLabel
-      textFormat: Text.PlainText
-      text: root.dayLabel(dayRow.day ? dayRow.day.date : "", dayRow.today)
-      color: dayRow.today ? root.foreground : root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      font.bold: dayRow.today
+    Column {
+      id: cardBody
       anchors.left: parent.left
+      anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(52)
-    }
-
-    Rectangle {
-      id: dayTrack
-      anchors.left: dayLabel.right
-      anchors.right: dayValue.left
-      anchors.leftMargin: Style.space(8)
+      anchors.leftMargin: Style.space(10)
       anchors.rightMargin: Style.space(10)
-      anchors.verticalCenter: parent.verticalCenter
-      height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
-      radius: height / 2
-      color: root.track
+      spacing: Style.space(2)
 
-      Rectangle {
-        anchors.left: parent.left
-        anchors.verticalCenter: parent.verticalCenter
-        height: parent.height
-        radius: parent.radius
-        width: parent.width * root.clamp(dayRow.ratio, 0, 1)
-        color: dayRow.today ? root.foreground : root.alpha(root.foreground, 0.55)
+      Item {
+        width: parent.width
+        implicitHeight: Math.max(cardTitle.implicitHeight, cardCaption.implicitHeight)
 
-        Behavior on width {
-          NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+        Text {
+          id: cardTitle
+          textFormat: Text.PlainText
+          text: usageCard.title
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          id: cardCaption
+          textFormat: Text.PlainText
+          text: "TOKENS"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
         }
       }
+
+      Text {
+        textFormat: Text.PlainText
+        text: usage.formatTokenCount(usageCard.value)
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.display
+        font.bold: true
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        // The mock's longer "observed subtotal" phrasing overflows the card at
+        // large font bases; these two words carry the same provenance note.
+        text: "Partial · observed"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
     }
+  }
+
+  // One column of the daily activity chart: the token count rides just above
+  // its bar, the weekday and date sit below. Today is picked out in full
+  // foreground so the week reads as a run-up to right now; a quiet day keeps
+  // a baseline stub instead of a bar and label.
+  component DayColumn: Item {
+    id: dayColumn
+    property var day: null
+    property real peak: 1
+    property bool today: false
+
+    readonly property real value: dayColumn.day ? Number(dayColumn.day.messageCount || 0) : 0
+    readonly property real ratio: dayColumn.peak > 0
+      ? root.clamp(dayColumn.value / dayColumn.peak, 0, 1)
+      : 0
+    readonly property real barMax: Style.space(64)
+    readonly property real barWidth: Math.max(Style.space(10),
+      Math.min(Math.round(dayColumn.width * 0.5), Style.space(28)))
+    readonly property real barHeight: dayColumn.value > 0
+      ? Math.max(Style.space(4), Math.round(dayColumn.ratio * dayColumn.barMax))
+      : Style.space(2)
+    readonly property real valueRowHeight: Math.round(Style.font.caption * 1.6)
+    readonly property real labelGap: Style.space(6)
+
+    implicitHeight: valueRowHeight + labelGap + barMax + labelGap + labelBlock.implicitHeight
 
     Text {
-      id: dayValue
+      id: valueText
       textFormat: Text.PlainText
-      text: usage.formatTokenCount(dayRow.day ? Number(dayRow.day.messageCount || 0) : 0)
-      color: dayRow.today ? root.foreground : root.dim
+      text: dayColumn.value > 0 ? usage.formatTokenCount(dayColumn.value) : ""
+      color: dayColumn.today ? root.foreground : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       font.bold: true
-      horizontalAlignment: Text.AlignRight
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(52)
+      anchors.horizontalCenter: parent.horizontalCenter
+      // Sits just above its bar's top, like the bar grew into its label.
+      y: Math.max(0, bar.y - height - Style.space(3))
+    }
+
+    Rectangle {
+      id: bar
+      width: dayColumn.barWidth
+      height: dayColumn.barHeight
+      radius: Math.min(Style.space(3), Math.round(height / 2))
+      color: dayColumn.today ? root.foreground
+        : dayColumn.value > 0 ? root.alpha(root.foreground, 0.5)
+        : root.alpha(root.foreground, 0.2)
+      anchors.horizontalCenter: parent.horizontalCenter
+      y: parent.height - labelBlock.implicitHeight - dayColumn.labelGap - height
+
+      Behavior on height {
+        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+      }
+    }
+
+    Column {
+      id: labelBlock
+      width: parent.width
+      anchors.bottom: parent.bottom
+      spacing: 0
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: root.dayLabel(dayColumn.day ? dayColumn.day.date : "", dayColumn.today)
+        color: dayColumn.today ? root.foreground : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: dayColumn.today
+        horizontalAlignment: Text.AlignHCenter
+      }
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: root.dayOfMonth(dayColumn.day ? dayColumn.day.date : "")
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
+      }
     }
 
     MouseArea {
@@ -1235,7 +1406,7 @@ Panel {
 
     PanelToolTip {
       visible: dayHover.containsMouse
-      text: root.dayTooltip(dayRow.day, dayRow.today)
+      text: root.dayTooltip(dayColumn.day, dayColumn.today)
       fontFamily: root.fontFamily
     }
   }

@@ -6,7 +6,7 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 
 - Shows available local AI-agent usage records in one bar widget for Claude Code, Codex, Fireworks, Hermes, and Grok.
 - Claude Code, Codex, Fireworks, Hermes, and Grok provider slots are enabled by default; other providers can appear through standard records and Hermes route discovery.
-- Displays limits, today’s prompts and sessions, seven-day history, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**.
+- Displays limits, today and last-7-days token cards, a daily activity chart, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**.
 - Normalizes provider limit records to show only windows actually supplied by upstream providers (session/5-hour, weekly, monthly, reset times, used/limit/remaining, and plan labels).
 - Shows a truthful "Limit unavailable / usage-only" status when a provider lacks a safe official quota source, preserving local usage metrics without fabricating quotas.
 - Collects Hermes TUI usage from the local `~/.hermes/state.db` database in read-only mode.
@@ -26,7 +26,7 @@ The plugin runs with the user’s normal desktop permissions inside the Omarchy 
 
 When your local Hermes installation records usage across backend providers, a nested route option bar appears within the Hermes tab:
 
-- **Automatic discovery & local-only selector**: The option bar discovers routes directly from models and billing providers in local Hermes usage. It allows switching between "All subscriptions" and specific discovered route groups (e.g., OpenAI Codex, OpenCode Go, Grok API, Grok Subscription, Google Gemini, Anthropic, or Unattributed), filtering the Hermes summary, 7-day token chart, activity metrics (API calls, sessions, active days), and model breakdown. This selector and its route data stay local to the machine running Hermes; route/subscription fields are omitted from synced snapshots and are never transmitted or merged across synced devices.
+- **Automatic discovery & local-only selector**: The option bar discovers routes directly from models and billing providers in local Hermes usage. It allows switching between "All subscriptions" and specific discovered route groups (e.g., OpenAI Codex, OpenCode Go, Grok API, Grok Subscription, Google Gemini, Anthropic, or Unattributed), filtering the Hermes summary, token cards and daily activity chart, activity metrics (API calls, sessions, active days), and model breakdown. This selector and its route data stay local to the machine running Hermes; route/subscription fields are omitted from synced snapshots and are never transmitted or merged across synced devices.
 - **Transport mode aggregation**: Transport modes (such as `chat_completions`, `codex_responses`, `anthropic_messages`) are treated as API transport channels rather than subscriptions, and do not divide a single provider subscription into separate routes.
 - **Strict attribution boundaries**: Subscriptions are never inferred from model names alone. Missing, unknown, URL-like, or secret-like metadata safely collapses into an explicit Unattributed fallback.
 - **Meaning and local accounting**: Route metrics are calculated entirely from the local `~/.hermes/state.db` database (`session_model_usage`). There is no remote quota, plan, balance, or rate-limit lookup against provider APIs. If you configure multiple accounts that share the exact same provider identifier, their metrics are grouped under that provider route.
@@ -42,7 +42,7 @@ The **TOKENS BY MODEL** section defaults to **Today** and offers four local-cale
 
 ## Interface example
 
-The panel combines provider tabs, a seven-day token history, and a model-level token breakdown. The values shown below are real local usage statistics from the captured demo machine; every installation displays its own local records.
+The panel combines provider tabs, today and last-7-days token cards, a daily activity chart, and a model-level token breakdown. The values shown below are real local usage statistics from the captured demo machine; every installation displays its own local records.
 
 ![AI Agents Usage panel showing provider tabs, token history, and model usage](assets/hermes-usage-panel.png)
 
