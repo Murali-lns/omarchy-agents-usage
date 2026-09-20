@@ -79,6 +79,7 @@ class TestSyncScanHelper(unittest.TestCase):
         self.assertIn("max_files=64", text)
         self.assertIn("max_file_bytes=262144", text)
         self.assertIn("max_total_bytes=2097152", text)
+        self.assertIn("max_entries_scanned=1024", text)
         self.assertIn('[[ -L "$f" || ! -f "$f" ]]', text)
         self.assertIn('head_bin=/usr/bin/head', text)
         self.assertIn('"$head_bin" -c "$size"', text)
@@ -155,8 +156,6 @@ class TestSyncScanHelper(unittest.TestCase):
         self.assertLessEqual(meta["bytes"], MAX_TOTAL_BYTES)
         self.assertEqual(meta["kept"], meta["bytes"] // 200000)
         self.assertLess(len(out), MAX_TOTAL_BYTES + 65536)
-        self.assertNotIn("bulk-10.json", out)
-        self.assertNotIn("bulk-11.json", out)
 
     def test_missing_and_empty_directories_exit_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -254,8 +253,19 @@ class TestQmlProcessBoundary(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("stat_bin=/usr/bin/stat", text)
         self.assertIn("head_bin=/usr/bin/head", text)
+        self.assertIn("find_bin=/usr/bin/find", text)
         self.assertLessEqual(text.count("/usr/bin/"), 3)
         self.assertNotIn("$(stat ", text)
+
+    def test_streamed_enumeration_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for i in range(1100):
+                (directory / f"s{i:04d}.json").symlink_to(directory / "target.json")
+            out = run_scan(directory)
+        meta = meta_of(out)
+        self.assertEqual((meta["kept"], meta["skipped"], meta["truncated"]), (0, 1024, 1))
+        self.assertEqual(snapshot_paths(out), [])
 
 class TestQmlSyncConsumers(unittest.TestCase):
     @classmethod

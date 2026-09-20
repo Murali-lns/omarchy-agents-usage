@@ -158,6 +158,7 @@ Item {
     clearEnvironment: true
     environment: root.minimalChildEnv
     workingDirectory: "/"
+    onExited: root.pumpReapQueue()
 
     stdout: StdioCollector {
       waitForEnd: true
@@ -165,18 +166,47 @@ Item {
     }
   }
 
+  // One leader PID per pending cleanup. The single reaper process drains this
+  // queue strictly one at a time: command must never be reassigned while the
+  // reaper is still running, or a later group would silently go unreaped.
+  property var pendingReapPids: []
+
+  function enqueueReap(leaderPid) {
+    if (!(Number(leaderPid) > 1)) return
+    var queued = pendingReapPids.slice()
+    queued.push(Number(leaderPid))
+    if (queued.length > 16) queued = queued.slice(0, 16)
+    pendingReapPids = queued
+    root.pumpReapQueue()
+  }
+
+  function pumpReapQueue() {
+    if (reaperProcess.running) return
+    if (pendingReapPids.length === 0) return
+    var next = pendingReapPids[0]
+    pendingReapPids = pendingReapPids.slice(1)
+    reaperProcess.command = root.supervisedCommand([root.binBash, root.reaperScriptPath, String(next)])
+    reaperProcess.running = true
+    if (!reaperProcess.running) {
+      console.warn("agents/reaper", "could not start the group reaper for", String(next))
+      root.pumpReapQueue()
+    }
+  }
+
   function killLeaked(processObject, guard) {
     if (!guard || !guard.active || processObject === null || !processObject.running) return
     guard.active = false
     console.warn("agents", "collector exceeded", processObject.objectName || "deadline", "— terminating")
+    // Capture the leader PID before signaling: processId is only readable
+    // while the process exists, and the reaper needs it to name the group.
+    var leaderPid = Number(processObject.processId || 0)
     try {
       processObject.signal(root.sigTerm)
     } catch (e) {
     }
     // The reaper validates group ownership and closes out any group members
     // that survived TERM, then the guarded onExited path completes normally.
-    reaperProcess.command = root.supervisedCommand([root.binBash, root.reaperScriptPath, String(processObject.processId || "")])
-    reaperProcess.running = true
+    root.enqueueReap(leaderPid)
   }
 
   // Guards cooperative exits from being treated as deadline kills. Each
@@ -187,77 +217,35 @@ Item {
     property bool active: false
     onActiveChanged: if (active) listDeadlineTimer.restart()
   }
-  Timer {
-    id: listExitGuardReset
-    interval: 0
-    repeat: false
-    onTriggered: listExitGuard.active = false
-  }
   QtObject {
     id: updateExitGuard
     property bool active: false
     onActiveChanged: if (active) updateDeadlineTimer.restart()
-  }
-  Timer {
-    id: updateExitGuardReset
-    interval: 0
-    repeat: false
-    onTriggered: updateExitGuard.active = false
   }
   QtObject {
     id: hermesExitGuard
     property bool active: false
     onActiveChanged: if (active) hermesDeadlineTimer.restart()
   }
-  Timer {
-    id: hermesExitGuardReset
-    interval: 0
-    repeat: false
-    onTriggered: hermesExitGuard.active = false
-  }
   QtObject {
     id: grokExitGuard
     property bool active: false
     onActiveChanged: if (active) grokDeadlineTimer.restart()
-  }
-  Timer {
-    id: grokExitGuardReset
-    interval: 0
-    repeat: false
-    onTriggered: grokExitGuard.active = false
   }
   QtObject {
     id: modelHistoryExitGuard
     property bool active: false
     onActiveChanged: if (active) modelHistoryDeadlineTimer.restart()
   }
-  Timer {
-    id: modelHistoryExitGuardReset
-    interval: 0
-    repeat: false
-    onTriggered: modelHistoryExitGuard.active = false
-  }
   QtObject {
     id: syncMkdirExitGuard
     property bool active: false
     onActiveChanged: if (active) syncMkdirDeadlineTimer.restart()
   }
-  Timer {
-    id: syncMkdirExitGuardReset
-    interval: 0
-    repeat: false
-    onTriggered: syncMkdirExitGuard.active = false
-  }
   QtObject {
     id: syncScanExitGuard
     property bool active: false
     onActiveChanged: if (active) syncScanDeadlineTimer.restart()
-  }
-  Timer {
-    id: syncScanExitGuardReset
-    interval: 0
-    repeat: false
-    onTriggered: syncScanExitGuard.active = false
   }
 
   property var agentIds: []
@@ -283,12 +271,18 @@ Item {
       waitForEnd: true
       onStreamFinished: root.applyAgentListing(text)
     }
+
+    onExited: listExitGuard.active = false
   }
 
   function rescanAgents() {
     if (!listProcess.running) {
       listExitGuard.active = true
       listProcess.running = true
+      // A launch that no process picked up must not leave its guard armed:
+      // an armed guard would defeat the next deadline restart (active is
+      // already true, so onActiveChanged cannot fire again).
+      if (!listProcess.running) listExitGuard.active = false
     }
   }
 

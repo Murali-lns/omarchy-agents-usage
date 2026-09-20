@@ -19,6 +19,14 @@
 #    so StdioCollector only ever buffers at most the cap for a stream, and a
 #    flooding child is severed (SIGPIPE) once it overruns its budget.
 #
+# 3. Group-wide TERM on the deadline. The command pipeline runs in the
+#    background and is collected with `wait`, because a trapped signal
+#    interrupts `wait` immediately; the trap then disarms its own TERM
+#    handler, TERMs the supervisor's entire group (the direct child leads
+#    it) and exits 143 — so a deadline reaches every descendant even if no
+#    external reaper is available. The reaper still completes the KILL
+#    escalation of the same group.
+#
 # No PATH lookups and no shell evaluation of data: every external tool is
 # pinned to an absolute path and the command runs directly from its argv.
 # The only bytes this script emits on its own are fixed diagnostic strings.
@@ -71,8 +79,18 @@ if [ "$(proc_group_id)" != "$$" ]; then
   exit 3
 fi
 
-# Bounded execution: each stream is capped before it reaches the caller.
-"$@" 2> >(/usr/bin/head -c "$err_cap" >&2) | /usr/bin/head -c "$out_cap"
-status=${PIPESTATUS[0]}
+# Bounded execution: each stream is capped before it reaches the caller. The
+# pipeline is run in the background so the TERM trap can fire promptly (a
+# trapped signal interrupts the wait builtin immediately); the trap first
+# disarms its own TERM handler — so the group-wide signal cannot race the
+# exit path — then TERMs the whole group and exits 143. That reaches every
+# descendant even when no external reaper is available.
+set -o pipefail
+trap 'trap "" TERM; kill -TERM -- "-$$" 2>/dev/null; exit 143' TERM HUP INT
+
+"$@" 2> >(/usr/bin/head -c "$err_cap" >&2) | /usr/bin/head -c "$out_cap" &
+pipeline_pid=$!
+wait "$pipeline_pid"
+status=$?
 wait 2>/dev/null
 exit "$status"

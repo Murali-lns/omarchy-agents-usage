@@ -72,6 +72,8 @@ class TestSupervisedRunHelper(unittest.TestCase):
         self.assertIn("#!/bin/bash", text)
         self.assertIn("exec /usr/bin/setsid /usr/bin/bash", text)
         self.assertIn("/usr/bin/head -c", text)
+        self.assertIn('trap "" TERM; kill -TERM -- "-$$"', text)
+        self.assertIn("TERM HUP INT", text)
         self.assertNotIn("PATH=", text)
 
     def test_argument_validation_fails_closed(self):
@@ -194,6 +196,27 @@ class TestSupervisedRunHelper(unittest.TestCase):
                 proc.kill()
                 proc.wait()
 
+    def test_term_reaches_the_whole_group_without_a_reaper(self):
+        proc = subprocess.Popen(
+            ["bash", str(SUPERVISOR), "4096", "4096", "/usr/bin/bash", "-c",
+             "/usr/bin/sleep 20 & /usr/bin/sleep 20 & wait"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(0.4)
+            self.assertGreaterEqual(len(group_members(proc.pid)), 3)
+            os.kill(proc.pid, signal.SIGTERM)
+            self.assertEqual(proc.wait(timeout=10), 143)
+            deadline = time.time() + 5
+            while time.time() < deadline and group_members(proc.pid):
+                time.sleep(0.1)
+            self.assertEqual(group_members(proc.pid), [])
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
     def test_reaper_refuses_a_pid_that_does_not_lead_its_group(self):
         victim = subprocess.Popen(["/usr/bin/bash", "-c", "/usr/bin/sleep 20"])
         try:
@@ -217,13 +240,16 @@ class TestSupervisedRunHelper(unittest.TestCase):
 
 
 class TestListRecordsHelper(unittest.TestCase):
-    def test_helper_declares_bounds_and_uses_no_external_tools(self):
+    def test_helper_streams_entries_with_a_pinned_enumerator(self):
         self.assertTrue(LISTER.is_file())
         self.assertTrue(os.access(LISTER, os.X_OK))
         text = LISTER.read_text(encoding="utf-8")
         self.assertIn("max_files=256", text)
         self.assertIn("max_name_length=255", text)
-        self.assertNotIn("/usr/bin/", text)
+        self.assertIn("max_entries_scanned=1024", text)
+        self.assertIn("find_bin=/usr/bin/find", text)
+        self.assertIn("read -r -d ''", text)
+        self.assertLessEqual(text.count("/usr/bin/"), 1)
 
     @staticmethod
     def run_lister(directory):
@@ -243,7 +269,7 @@ class TestListRecordsHelper(unittest.TestCase):
             result = self.run_lister(directory)
         self.assertEqual(result.returncode, 0)
         lines = result.stdout.splitlines()
-        self.assertEqual(lines[:-1], ["claude.json", "codex.json"])
+        self.assertEqual(sorted(lines[:-1]), ["claude.json", "codex.json"])
         meta = json.loads(lines[-1].split(" ", 1)[1])
         self.assertEqual((meta["kept"], meta["skipped"], meta["truncated"]), (2, 0, 0))
 
@@ -274,7 +300,19 @@ class TestListRecordsHelper(unittest.TestCase):
         self.assertEqual(len(lines) - 1, MAX_FILES)
         meta = json.loads(lines[-1].split(" ", 1)[1])
         self.assertEqual((meta["kept"], meta["truncated"]), (MAX_FILES, 1))
-        self.assertNotIn("dev-260.json", result.stdout)
+
+    def test_streamed_enumeration_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for i in range(1100):
+                (directory / f"s{i:04d}.json").symlink_to(directory / "target.json")
+            result = self.run_lister(directory)
+        lines = result.stdout.splitlines()
+        meta = json.loads(lines[-1].split(" ", 1)[1])
+        # The consumer stops after the entry cap: no matter how many symlinks
+        # exist, at most max_entries_scanned are ever examined.
+        self.assertEqual((meta["kept"], meta["skipped"], meta["truncated"]), (0, 1024, 1))
+        self.assertEqual(len(lines), 1)
 
     def test_missing_directory_exits_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -327,6 +365,24 @@ class TestQmlSupervisorWiring(unittest.TestCase):
     def test_sync_scan_uses_the_wider_supervised_cap(self):
         self.assertIn("readonly property int syncScanStdoutCapBytes:", self.main)
         self.assertIn("root.syncScanStdoutCapBytes)", self.main)
+
+    def test_reap_queue_is_serialized(self):
+        self.assertIn("property var pendingReapPids: []", self.main)
+        self.assertIn("function pumpReapQueue()", self.main)
+        self.assertIn("onExited: root.pumpReapQueue()", self.main)
+        self.assertIn("root.enqueueReap(leaderPid)", self.main)
+
+    def test_leader_pid_is_captured_before_signaling(self):
+        block = self.main[self.main.index("function killLeaked("):]
+        block = block[:block.index("// Guards cooperative")]
+        self.assertLess(
+            block.index("var leaderPid = Number(processObject.processId || 0)"),
+            block.index("processObject.signal(root.sigTerm)"),
+        )
+
+    def test_listing_guard_is_cleared_on_exit(self):
+        self.assertIn("onExited: listExitGuard.active = false", self.main)
+        self.assertNotIn("ExitGuardReset", self.main)
 
     def test_supervisor_and_lister_are_referenced_by_the_qml(self):
         self.assertIn("supervisedRunScriptPath", self.main)
