@@ -124,6 +124,15 @@ def usage_percent(value: Any) -> float:
     return min(1.0, parsed / 100.0)
 
 
+_FRACTIONAL_SECONDS_RE = re.compile(r"(T\d{2}:\d{2}:\d{2})\.\d+")
+
+
+def trim_fractional_seconds(value: str) -> str:
+    # The panel's Date parse gets the same second-precision shape the other
+    # collectors publish; sub-second precision buys a countdown nothing.
+    return _FRACTIONAL_SECONDS_RE.sub(r"\1", str(value or ""))
+
+
 def money_cents(value: Any) -> float:
     if isinstance(value, dict):
         value = value.get("val", value.get("value", 0))
@@ -176,9 +185,36 @@ def parse_billing(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         config = {}
 
+    result["tierLabel"] = display_label(
+        payload.get("subscription_tier_display") or config.get("subscription_tier_display")
+    ) or plan_label(
+        str(
+            payload.get("subscriptionTier")
+            or config.get("subscriptionTier")
+            or payload.get("subscription_tier")
+            or config.get("subscription_tier")
+            or ""
+        )
+    )
+
     percent = usage_percent(config.get("creditUsagePercent"))
     period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}
-    reset = str((period or {}).get("end") or config.get("billingPeriodEnd") or "")
+    reset = trim_fractional_seconds(str((period or {}).get("end") or config.get("billingPeriodEnd") or ""))
+    # creditUsagePercent is a proto3 scalar, so the server omits it at its
+    # default: an active billing period with no percentage means no usage yet
+    # this period, not unknown usage (the same read the CLI panel makes of
+    # this payload). SuperGrok Heavy keeps an absent percentage as unknown.
+    heavy_tier = "heavy" in " ".join(
+        (
+            str(payload.get("subscription_tier_display") or ""),
+            str(config.get("subscription_tier_display") or ""),
+            str(payload.get("subscriptionTier") or config.get("subscriptionTier") or ""),
+            str(payload.get("subscription_tier") or config.get("subscription_tier") or ""),
+            result["tierLabel"],
+        )
+    ).lower()
+    if percent < 0 and reset != "" and not heavy_tier:
+        percent = 0.0
     if percent >= 0:
         result["limits"].append(
             {
@@ -200,18 +236,6 @@ def parse_billing(payload: dict[str, Any]) -> dict[str, Any]:
             "spent": spent,
             "currency": "USD",
         }
-
-    result["tierLabel"] = display_label(
-        payload.get("subscription_tier_display") or config.get("subscription_tier_display")
-    ) or plan_label(
-        str(
-            payload.get("subscriptionTier")
-            or config.get("subscriptionTier")
-            or payload.get("subscription_tier")
-            or config.get("subscription_tier")
-            or ""
-        )
-    )
     return result
 
 

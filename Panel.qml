@@ -731,7 +731,10 @@ Panel {
 
           // ---------- Status ----------
           BorderSurface {
-            visible: !!root.provider && String(root.provider.usageStatusText || "") !== ""
+            // The banner carries the provider's auth guidance; a status with
+            // no guidance has nothing to say here (the limits section already
+            // speaks for usage-only states).
+            visible: !!root.provider && String(root.provider.authHelpText || "") !== ""
             width: parent.width
             implicitHeight: statusText.implicitHeight + Style.spacing.xl * 2
             color: root.alpha(root.urgent, 0.10)

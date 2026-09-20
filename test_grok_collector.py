@@ -319,7 +319,38 @@ class TestGrokCollector(unittest.TestCase):
         self.assertEqual(parsed["limits"][0]["resetsAt"], "2026-09-15T00:00:00Z")
         self.assertIsNone(parsed["balance"])
 
-    def test_parse_billing_does_not_invent_zero_percent(self):
+    def test_parse_billing_reads_omitted_percent_as_zero_usage_for_active_period(self):
+        parsed = self.collector.parse_billing(
+            {
+                "subscription_tier": "X Premium+",
+                "config": {
+                    "currentPeriod": {
+                        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                        "start": "2026-09-20T08:18:42.164080+00:00",
+                        "end": "2026-09-27T08:18:42.164080+00:00",
+                    },
+                    "onDemandCap": {"val": 0},
+                    "onDemandUsed": {"val": 0},
+                    "prepaidBalance": {"val": 0},
+                    "isUnifiedBillingUser": True,
+                    "billingPeriodStart": "2026-09-20T08:18:42.164080+00:00",
+                    "billingPeriodEnd": "2026-09-27T08:18:42.164080+00:00",
+                },
+            }
+        )
+        self.assertEqual(parsed["tierLabel"], "X Premium+")
+        self.assertEqual(len(parsed["limits"]), 1)
+        self.assertEqual(parsed["limits"][0]["label"], "Weekly")
+        self.assertEqual(parsed["limits"][0]["percent"], 0.0)
+        # Second precision, matching the shape the other collectors publish.
+        self.assertEqual(parsed["limits"][0]["resetsAt"], "2026-09-27T08:18:42+00:00")
+        self.assertIsNone(parsed["balance"])
+
+    def test_parse_billing_omitted_percent_without_a_period_stays_unknown(self):
+        parsed = self.collector.parse_billing({"subscription_tier": "X Premium+", "config": {}})
+        self.assertEqual(parsed["limits"], [])
+
+    def test_parse_billing_omitted_percent_stays_unknown_for_supergrok_heavy(self):
         parsed = self.collector.parse_billing(
             {
                 "subscription_tier_display": "SuperGrok Heavy",

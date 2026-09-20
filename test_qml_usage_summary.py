@@ -60,6 +60,11 @@ class TestQmlUsageSummary(unittest.TestCase):
         self.assertIn("Partial · observed", card)
         self.assertIn('"TOKENS"', card)
 
+    def test_status_banner_only_shows_when_there_is_help_text(self):
+        status = self.block(self.panel, "// ---------- Status ----------", "// ---------- Balance / limits ----------")
+        self.assertIn('String(root.provider.authHelpText || "") !== ""', status)
+        self.assertNotIn("usageStatusText", status)
+
 
 if __name__ == "__main__":
     unittest.main()
