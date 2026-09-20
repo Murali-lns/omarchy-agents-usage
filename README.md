@@ -44,7 +44,7 @@ The **TOKENS BY MODEL** section defaults to **Today** and offers four local-cale
 
 The panel combines provider tabs, today and last-7-days token cards, a daily activity chart, and a model-level token breakdown. The values shown below are real local usage statistics from the captured demo machine; every installation displays its own local records.
 
-![AI Agents Usage panel showing provider tabs, token history, and model usage](assets/hermes-usage-panel.png)
+![AI Agents Usage panel showing provider tabs, token summary cards, a daily activity chart, and model usage](assets/hermes-usage-panel.png)
 
 ## Requirements
 
