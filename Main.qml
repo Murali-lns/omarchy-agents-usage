@@ -5,9 +5,12 @@ import Quickshell.Io
 // The display side of agent usage. Omarchy's updater remains authoritative
 // for packaged collectors; this plugin runs the Hermes collector, a Grok
 // collector that defers to Omarchy when `omarchy-agent-usage-grok` exists,
-// and the supplemental model-history phase. This file discovers standard records,
-// watches them, and merges optional snapshots synced from other machines,
-// bounded by hard file-size, file-count, and entry-type limits.
+// and the supplemental model-history phase. This file discovers standard
+// records through a bounded listing helper, watches them, and merges optional
+// snapshots synced from other machines, bounded by hard file-size, file-count,
+// and entry-type limits. Every spawned command runs under a supervisor that
+// owns a dedicated process group, caps both streams at the pipe boundary,
+// and carries a hard deadline with TERM-then-KILL group reaping.
 Item {
   id: root
   visible: false
@@ -25,17 +28,16 @@ Item {
   // ------------------------------------------------------------- discovery
 
   // ------------------------------------------------ process-boundary hardening
-  // Every spawned binary is referenced by absolute trusted path, every child
-  // gets a minimal explicit environment (no inherited LD_PRELOAD or Python
-  // import path), stdout/stderr are capped before QML buffering, and each
-  // process carries a hard deadline with a TERM-then-KILL escalation so one
-  // hung or flooding helper can never stall or exhaust the shell.
+  // Every spawned command runs through supervised-run.sh: a dedicated
+  // process group per command (PID == PGID == SID, ownership verified from
+  // /proc before the command runs), a cleared environment with a minimal
+  // explicit one, both streams capped at the pipe boundary before QML can
+  // buffer a byte, and a hard deadline whose TERM-then-KILL escalation is
+  // closed out by the bounded group janitor. A hung or flooding helper can
+  // neither stall nor exhaust the long-lived shell.
   readonly property string binBash: "/usr/bin/bash"
-  readonly property string binFind: "/usr/bin/find"
   readonly property string binMkdir: "/usr/bin/mkdir"
   readonly property string binPython3: "/usr/bin/python3"
-  readonly property string binCp: "/usr/bin/cp"
-  readonly property string binRm: "/usr/bin/rm"
   readonly property string omarchyUsageUpdatePath: "/usr/share/omarchy/bin/omarchy-agent-usage-update"
 
   // Every spawned process resolves its own interpreter the same trusted way
@@ -46,7 +48,15 @@ Item {
   readonly property int collectorDeadlineMs: 120000
   readonly property int discoveryDeadlineMs: 20000
   readonly property int syncDeadlineMs: 30000
-  readonly property int streamCapBytes: 262144 // per-stream output ceiling
+  // Producer-side per-stream cap handed to supervised-run.sh; a child that
+  // overruns it is severed at the pipe instead of buffered into the shell.
+  readonly property int streamCapBytes: 262144
+  // The scan helper's own budget (2 MiB of payload plus markers) sits below
+  // this ceiling; the cap is pure defence in depth at the pipe boundary.
+  readonly property int syncScanStdoutCapBytes: 2621440
+  // Console text is trimmed to this before console.warn. Display hygiene
+  // only — the safety cap is producer-side, not a post-hoc truncation.
+  readonly property int consoleMessageCapChars: 400
 
   Timer {
     id: listDeadlineTimer
@@ -91,21 +101,54 @@ Item {
     onTriggered: root.killLeaked(syncScanProcess, syncScanExitGuard)
   }
 
-  // Process objects expose a signal(int) that is delivered to the direct child
-  // only; the trusted helpers are started under setsid to own a process group,
-  // and the runtime reaps the group through a bounded helper after TERM.
-  // SIGTERM (15), then SIGKILL (9) — numeric so no headers are needed.
+  // Process objects expose a signal(int) that is delivered to the direct
+  // child only. Via supervised-run.sh the direct child leads a dedicated
+  // process group (PID == PGID == SID, ownership re-verified from /proc
+  // before the command runs), so -PID names exactly that command's group;
+  // after TERM the bounded reaper validates ownership again and closes the
+  // group out with a final KILL. SIGTERM (15), then SIGKILL (9) — numeric so
+  // no headers are needed.
   readonly property int sigTerm: 15
   readonly property int sigKill: 9
 
+  // Runs every spawned command: owns its process group and caps both streams
+  // at the pipe boundary before they reach this long-lived process.
+  readonly property string supervisedRunScriptPath: {
+    var resolved = Qt.resolvedUrl("supervised-run.sh").toString().replace(/^file:\/\//, "")
+    if (resolved && resolved.indexOf("/") !== -1) {
+      return resolved
+    }
+    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/supervised-run.sh"
+  }
+
+  // Discovers standard records with producer-side file-count and name bounds
+  // instead of an unbounded directory walk.
+  readonly property string listRecordsScriptPath: {
+    var resolved = Qt.resolvedUrl("list-records.sh").toString().replace(/^file:\/\//, "")
+    if (resolved && resolved.indexOf("/") !== -1) {
+      return resolved
+    }
+    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/list-records.sh"
+  }
+
   // Reaps a terminated child's process group through a bounded, absolute-path
-  // runtime helper: TERM to any surviving group members, then KILL, then reap.
+  // runtime helper: ownership validation, TERM to survivors, then KILL.
   readonly property string reaperScriptPath: {
     var resolved = Qt.resolvedUrl("reap-group.sh").toString().replace(/^file:\/\//, "")
     if (resolved && resolved.indexOf("/") !== -1) {
       return resolved
     }
     return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/reap-group.sh"
+  }
+
+  // Every spawn goes through the supervisor: absolute interpreter, dedicated
+  // process group, and producer-side caps for both streams.
+  function supervisedCommand(argv, stdoutCapBytes) {
+    var command = [root.binBash, root.supervisedRunScriptPath,
+                   String(stdoutCapBytes === undefined ? root.streamCapBytes : stdoutCapBytes),
+                   String(root.streamCapBytes)]
+    for (var i = 0; i < argv.length; i++) command.push(argv[i])
+    return command
   }
 
   Process {
@@ -130,9 +173,9 @@ Item {
       processObject.signal(root.sigTerm)
     } catch (e) {
     }
-    // The reaper closes out any group members that survived TERM, then the
-    // guarded onExited path completes normally.
-    reaperProcess.command = [root.binBash, root.reaperScriptPath, String(processObject.processId || "")]
+    // The reaper validates group ownership and closes out any group members
+    // that survived TERM, then the guarded onExited path completes normally.
+    reaperProcess.command = root.supervisedCommand([root.binBash, root.reaperScriptPath, String(processObject.processId || "")])
     reaperProcess.running = true
   }
 
@@ -231,7 +274,7 @@ Item {
   Process {
     id: listProcess
     running: false
-    command: [root.binFind, root.usageDir, "-maxdepth", "1", "-name", "*.json", "-not", "-name", ".model-history.json", "-printf", "%f\\n"]
+    command: root.supervisedCommand([root.binBash, root.listRecordsScriptPath, root.usageDir])
     clearEnvironment: true
     environment: root.minimalChildEnv
     workingDirectory: "/"
@@ -255,6 +298,10 @@ Item {
     for (var i = 0; i < lines.length; i++) {
       var name = lines[i].trim()
       if (name === ".model-history.json") continue
+      if (name.indexOf("list-meta ") === 0) {
+        root.reportListMeta(name.slice(10))
+        continue
+      }
       if (name.slice(-5) === ".json") {
         var id = name.slice(0, -5)
         if (!root.isRetiredProviderId(id)) ids.push(id)
@@ -264,6 +311,23 @@ Item {
     // Same list, same objects: reassigning the model would tear down every
     // FileView just to build identical ones.
     if (JSON.stringify(ids) !== JSON.stringify(agentIds)) agentIds = ids
+  }
+
+  // The bounded listing helper reports its kept/skipped/truncated counts;
+  // a capped scan is surfaced instead of being silently shortened.
+  function reportListMeta(raw) {
+    var meta = null
+    try {
+      meta = JSON.parse(String(raw || ""))
+    } catch (e) {
+    }
+    if (!meta || typeof meta !== "object") return
+    var skipped = Number(meta.skipped) || 0
+    var truncated = Number(meta.truncated) === 1
+    if (skipped > 0 || truncated)
+      console.warn("agents/list", "provider record listing capped: kept "
+        + String(Number(meta.kept) || 0) + ", skipped " + String(skipped)
+        + (truncated ? ", truncated" : ""))
   }
 
   Instantiator {
@@ -357,8 +421,10 @@ Item {
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        // Console hygiene only: supervised-run.sh already capped this stream
+        // producer-side, so the collector only ever holds bounded text.
         var message = String(text || "")
-        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
+        if (message.length > root.consoleMessageCapChars) message = message.substring(0, root.consoleMessageCapChars)
         if (message.trim() !== "") console.warn("agents", message.trim())
       }
     }
@@ -388,8 +454,10 @@ Item {
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        // Console hygiene only: supervised-run.sh already capped this stream
+        // producer-side, so the collector only ever holds bounded text.
         var message = String(text || "")
-        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
+        if (message.length > root.consoleMessageCapChars) message = message.substring(0, root.consoleMessageCapChars)
         if (message.trim() !== "") console.warn("agents/hermes", message.trim())
       }
     }
@@ -418,8 +486,10 @@ Item {
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        // Console hygiene only: supervised-run.sh already capped this stream
+        // producer-side, so the collector only ever holds bounded text.
         var message = String(text || "")
-        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
+        if (message.length > root.consoleMessageCapChars) message = message.substring(0, root.consoleMessageCapChars)
         if (message.trim() !== "") console.warn("agents/grok", message.trim())
       }
     }
@@ -451,15 +521,17 @@ Item {
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        // Console hygiene only: supervised-run.sh already capped this stream
+        // producer-side, so the collector only ever holds bounded text.
         var message = String(text || "")
-        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
+        if (message.length > root.consoleMessageCapChars) message = message.substring(0, root.consoleMessageCapChars)
         if (message.trim() !== "") console.warn("agents/model-history", message.trim())
       }
     }
   }
 
   function modelHistoryCommand() {
-    return [root.binPython3, root.modelHistoryCollectorPath]
+    return root.supervisedCommand([root.binPython3, root.modelHistoryCollectorPath])
   }
 
   property bool modelHistoryRequested: false
@@ -515,14 +587,14 @@ Item {
     var cmd = [root.binPython3, root.hermesCollectorPath]
     if (kind === "force") cmd.push("--force")
     if (kind === "limits") cmd.push("--limits-only")
-    return cmd
+    return root.supervisedCommand(cmd)
   }
 
   function grokCommand(kind) {
     var cmd = [root.binPython3, root.grokCollectorPath]
     if (kind === "force") cmd.push("--force")
     if (kind === "limits") cmd.push("--limits-only")
-    return cmd
+    return root.supervisedCommand(cmd)
   }
 
   function updateCommand(kind, agentIds) {
@@ -539,7 +611,7 @@ Item {
         if (!root.isRetiredProviderId(agentIds[i]) && agentIds[i] !== "hermes" && agentIds[i] !== "grok") command.push(agentIds[i])
       }
     }
-    return command
+    return root.supervisedCommand(command)
   }
 
   function runUpdate(kind, agentIds) {
@@ -804,9 +876,11 @@ Item {
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        // Console hygiene only: supervised-run.sh already capped this stream
+        // producer-side, so the collector only ever holds bounded text.
         var message = String(text || "")
-        if (message.length > root.streamCapBytes) message = message.substring(0, root.streamCapBytes)
-        if (message.trim() !== "") console.warn("agents/sync", message.trim().slice(0, 500))
+        if (message.length > root.consoleMessageCapChars) message = message.substring(0, root.consoleMessageCapChars)
+        if (message.trim() !== "") console.warn("agents/sync", message.trim())
       }
     }
   }
@@ -904,7 +978,7 @@ Item {
 
     syncRequestedWhileRunning = false
     syncStatusText = ""
-    syncMkdirProcess.command = [root.binMkdir, "-p", root.syncEffectiveDir]
+    syncMkdirProcess.command = root.supervisedCommand([root.binMkdir, "-p", root.syncEffectiveDir])
     syncMkdirExitGuard.active = true
     syncMkdirProcess.running = true
     if (!syncMkdirProcess.running) syncMkdirExitGuard.active = false
@@ -925,8 +999,10 @@ Item {
       return
     }
     // sync-scan.sh reads the folder under hard size, count, and entry-type
-    // bounds, so StdioCollector below only ever buffers a bounded document.
-    syncScanProcess.command = [root.binBash, root.syncScanScriptPath, root.syncEffectiveDir]
+    // bounds, and the supervisor relays its output through a cap above the
+    // helper's own budget, so StdioCollector below only ever buffers a
+    // bounded document.
+    syncScanProcess.command = root.supervisedCommand([root.binBash, root.syncScanScriptPath, root.syncEffectiveDir], root.syncScanStdoutCapBytes)
     syncScanExitGuard.active = true
     syncScanProcess.running = true
     if (!syncScanProcess.running) syncScanExitGuard.active = false

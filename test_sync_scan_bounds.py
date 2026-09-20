@@ -193,18 +193,24 @@ class TestQmlProcessBoundary(unittest.TestCase):
     def test_absolute_trusted_binaries(self):
         for needle in (
             'readonly property string binBash: "/usr/bin/bash"',
-            'readonly property string binFind: "/usr/bin/find"',
             'readonly property string binMkdir: "/usr/bin/mkdir"',
             'readonly property string binPython3: "/usr/bin/python3"',
             'omarchyUsageUpdatePath: "/usr/share/omarchy/bin/omarchy-agent-usage-update"',
+            'readonly property string supervisedRunScriptPath: {',
+            'readonly property string listRecordsScriptPath: {',
+            'readonly property string reaperScriptPath: {',
         ):
             self.assertIn(needle, self.main)
+        # The unbounded find walk is gone; discovery runs through the bounded
+        # listing helper instead.
+        self.assertNotIn("binFind", self.main)
+        self.assertNotIn('"/usr/bin/find"', self.main)
 
     def test_collectors_started_through_absolute_interpreter(self):
         self.assertIn("[root.binPython3, root.hermesCollectorPath]", self.main)
         self.assertIn("[root.binPython3, root.grokCollectorPath]", self.main)
         self.assertIn("[root.binPython3, root.modelHistoryCollectorPath]", self.main)
-        self.assertIn("syncScanProcess.command = [root.binBash", self.main)
+        self.assertIn("syncScanProcess.command = root.supervisedCommand([root.binBash, root.syncScanScriptPath", self.main)
 
     def test_minimal_explicit_environment(self):
         self.assertIn("clearEnvironment: true", self.main)
@@ -214,8 +220,14 @@ class TestQmlProcessBoundary(unittest.TestCase):
         self.assertEqual(cleared, spawns)
 
     def test_stream_output_is_capped(self):
+        # Every spawn carries producer-side caps through the supervisor;
+        # console trimming is display hygiene only.
         self.assertIn("readonly property int streamCapBytes:", self.main)
-        self.assertGreaterEqual(self.main.count("streamCapBytes)"), 5)
+        self.assertGreaterEqual(self.main.count("root.supervisedCommand("), 8)
+        self.assertIn("String(stdoutCapBytes === undefined ? root.streamCapBytes : stdoutCapBytes)", self.main)
+        self.assertIn("String(root.streamCapBytes)]", self.main)
+        self.assertGreaterEqual(self.main.count("root.consoleMessageCapChars"), 5)
+        self.assertNotIn("substring(0, root.streamCapBytes)", self.main)
 
     def test_deadlines_and_group_reaper_exist(self):
         self.assertIn("readonly property int collectorDeadlineMs:", self.main)
@@ -233,6 +245,8 @@ class TestQmlProcessBoundary(unittest.TestCase):
         self.assertIn("#!/bin/bash", text)
         self.assertIn("kill -0", text)
         self.assertIn("kill -KILL", text)
+        self.assertIn("sleep_bin=/usr/bin/sleep", text)
+        self.assertIn('"/proc/$pid/stat"', text)
         self.assertNotIn("PATH=", text)
         self.assertTrue(os.access(helper, os.X_OK))
 
@@ -256,7 +270,10 @@ class TestQmlSyncConsumers(unittest.TestCase):
 
     def test_scan_runs_the_bounded_helper_not_an_inline_cat(self):
         self.assertIn("sync-scan.sh", self.main)
-        self.assertIn('syncScanProcess.command = [root.binBash, root.syncScanScriptPath, root.syncEffectiveDir]', self.main)
+        self.assertIn(
+            "syncScanProcess.command = root.supervisedCommand([root.binBash, root.syncScanScriptPath, root.syncEffectiveDir], root.syncScanStdoutCapBytes)",
+            self.main,
+        )
         self.assertNotIn('cat \\"$f\\"', self.main)
 
     def test_parse_side_caps_bound_the_scan_document(self):

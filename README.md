@@ -18,7 +18,7 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 - Writes Grok’s display record to `~/.local/state/omarchy/agents/usage/grok.json` when the packaged Omarchy Grok collector is absent.
 - The Hermes and Grok collectors never read or send prompt text, message content, API keys, or credentials. Grok SuperGrok weekly/monthly meters come from the Grok CLI (`grok agent --no-leader stdio`, `_x.ai/billing`); the collector does not read `auth.json` or call billing URLs itself.
 - Claude Code, Codex, and Fireworks records are collected through Omarchy’s existing provider tools.
-- Optional cross-device aggregation is off by default and is enabled only through the user’s explicit widget settings. Snapshot scans are bounded (at most 64 files, 256 KiB per file, 2 MiB per scan); oversized, empty, non-regular, and symlinked entries are skipped, and skipped or truncated input is reported in the panel instead of being loaded.
+- Optional cross-device aggregation is off by default and is enabled only through the user’s explicit widget settings. Snapshot scans are bounded (at most 64 files, 256 KiB per file, 2 MiB per scan); oversized, empty, non-regular, and symlinked entries are skipped, and skipped or truncated input is reported in the panel instead of being loaded. Provider-record discovery likewise runs through a bounded listing helper (at most 256 records, names only, no external tools), and capped scans are reported instead of silently shortened.
 
 The plugin runs with the user’s normal desktop permissions inside the Omarchy shell. Review the source before enabling it, as with every third-party Omarchy plugin.
 
@@ -81,6 +81,14 @@ omarchy plugin update io.github.murali-lns.agents-usage
 ```bash
 omarchy-shell io.github.murali-lns.agents-usage refresh
 ```
+
+## Process boundary
+
+Every command the plugin runs — the collectors, the shared Omarchy updater, the sync helpers, the directory listing, and the process-group reaper itself — is launched through a supervisor (`supervised-run.sh`):
+
+- **Dedicated process group per command.** The supervisor re-execs itself through the pinned `/usr/bin/setsid` so the direct child leads its own process group and session (PID == PGID == SID), re-verifies that ownership from `/proc` before the command runs, and refuses to run anything otherwise. A hard deadline TERMs the child, and the bounded reaper (`reap-group.sh`) validates group ownership again and completes a TERM-then-KILL escalation of exactly that group, so no descendant survives a timeout.
+- **Producer-side stream caps.** stdout and stderr are each relayed through a pinned `head -c` cap (256 KiB per stream) before they can reach the long-lived shell process, so a flooding child is severed at the pipe instead of being buffered. The sync scan has its own wider cap above the helper's 2 MiB budget.
+- **No PATH resolution.** Every binary and interpreter is invoked by absolute trusted path (`/usr/bin/bash`, `/usr/bin/python3`, `/usr/bin/setsid`, `/usr/bin/head`, the Omarchy updater under `/usr/share/omarchy`), children get a cleared environment plus an explicit `HOME` only, and no shebang is ever consulted.
 
 ## Privacy and data boundaries
 
