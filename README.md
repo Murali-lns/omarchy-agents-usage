@@ -35,6 +35,8 @@ When your local Hermes installation records usage across backend providers, a ne
 
 The **TOKENS BY MODEL** section defaults to **Today** and offers four local-calendar filters: **Today**, **7 days**, **1 month** (today plus the previous 29 days), and **All time**. The panel renders all valid models in the selected period; it does not silently truncate the list.
 
+Hovering any model row opens a small card with the tokens behind that model's total: **In**, **Out**, **Cache read**, and **Cache write**, with an em dash for a bucket the record does not report. Records without per-bucket detail show a single Total row instead.
+
 - Hermes publishes exact per-model period totals directly from its read-only usage tables.
 - Older/native provider records that expose only current-day and cumulative model totals are tracked by the local hidden `~/.local/state/omarchy/agents/usage/.model-history.json` sidecar. It reads standard usage records only, keeps at most 31 daily buckets, and begins 7-day/month coverage at the first safe observation; it never assigns historical all-time totals to the first day.
 - The sidecar is local-only, mode `0600`, atomic, and contains only bounded provider/model token aggregates. It never reads transcripts, prompts, conversations, databases, credentials, or endpoints. Native provider records remain authoritative whenever they publish a period.

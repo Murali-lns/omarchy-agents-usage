@@ -67,13 +67,26 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn("modelHistoryRequested = true", self.main)
 
     def test_model_rows_are_not_silently_limited_to_four_and_shares_are_safe(self):
-        model_rows = self.block(self.panel, "function modelRows(p)", "\n  function modelTooltip")
+        model_rows = self.block(self.panel, "function modelRows(p)", "\n  function modelBreakdownRows")
         self.assertNotIn("slice(0, 4)", model_rows)
         self.assertIn("return rows", model_rows)
         self.assertIn("function modelShare", self.panel)
         share = self.block(self.panel, "function modelShare", "\n  // Only speaks up")
         self.assertIn("isFinite", share)
         self.assertIn("root.modelShare(modelData, root.models)", self.panel)
+
+    def test_model_rows_expose_a_token_bucket_hover_card(self):
+        entries = self.block(self.panel, "function modelBreakdownRows", "\n  // Only speaks up")
+        self.assertIn('"In"', entries)
+        self.assertIn('"Out"', entries)
+        self.assertIn('"Cache read"', entries)
+        self.assertIn('"Cache write"', entries)
+        self.assertIn("hasBreakdown", entries)
+        card = self.panel[self.panel.index("component ModelBreakdownCard"):]
+        self.assertIn("ModelBreakdownCard {", self.panel)
+        self.assertIn('text: "TOKENS BY MODEL"', card)
+        self.assertIn('"—"', card)
+        self.assertIn("modelBreakdownRows", card)
 
     def test_models_have_explicit_generic_unavailable_copy(self):
         source = self.block(self.panel, "function modelUsageSourceFor", "\n  function modelPeriodValues")
@@ -126,7 +139,7 @@ class TestQmlModelPeriods(unittest.TestCase):
         )
 
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.5.2")
+        self.assertEqual(manifest["version"], "1.6.0")
         providers = manifest["barWidget"]["defaults"]["providers"]
         self.assertEqual(set(providers), {"claude", "codex", "fireworks", "hermes", "grok"})
         self.assertTrue(all(config.get("enabled") is True for config in providers.values()))

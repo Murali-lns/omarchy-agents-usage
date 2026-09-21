@@ -453,14 +453,19 @@ Panel {
     return clamp(total / peak, 0, 1)
   }
 
-  function modelTooltip(row) {
-    if (!row) return ""
+  // The hover card's rows: the four buckets behind a model's total. A record
+  // that predates per-bucket detail collapses to one Total row, and a bucket
+  // the record leaves empty keeps its slot with an em dash instead of a 0.
+  function modelBreakdownRows(row) {
+    if (!row) return []
     if (row.hasBreakdown !== true)
-      return "Total " + usage.formatTokenCount(row.total) + " tokens"
-    return "In " + usage.formatTokenCount(row.input)
-      + " · out " + usage.formatTokenCount(row.output)
-      + " · cache read " + usage.formatTokenCount(row.cacheRead)
-      + " · cache write " + usage.formatTokenCount(row.cacheWrite)
+      return [{ glyph: "", label: "Total", value: row.total }]
+    return [
+      { glyph: "\uf063", label: "In", value: row.input },
+      { glyph: "\uf062", label: "Out", value: row.output },
+      { glyph: "\uf0e7", label: "Cache read", value: row.cacheRead },
+      { glyph: "\uf040", label: "Cache write", value: row.cacheWrite }
+    ]
   }
 
   // Only speaks up when the numbers cover more than this machine.
@@ -1479,10 +1484,111 @@ Panel {
       acceptedButtons: Qt.NoButton
     }
 
-    PanelToolTip {
+    ModelBreakdownCard {
       visible: modelHover.containsMouse
-      text: root.modelTooltip(modelRow.row)
-      fontFamily: root.fontFamily
+      row: modelRow.row
+    }
+  }
+
+  // The hover card for a model row: the model's token buckets as a small
+  // labelled box on the shared tooltip surface. It lifts above the row so
+  // rows near the bottom of the dashboard never push it past the panel edge.
+  component ModelBreakdownCard: ToolTip {
+    id: breakdown
+
+    property var row: null
+
+    readonly property var entries: root.modelBreakdownRows(row)
+    readonly property color entryColor: Color.tooltip.text
+    readonly property color entryDim: root.alpha(entryColor, 0.8)
+
+    delay: 400
+    padding: 0
+    leftPadding: Style.spacing.controlPaddingX
+    rightPadding: Style.spacing.controlPaddingX
+    topPadding: Style.spacing.controlPaddingY + Style.space(2)
+    bottomPadding: Style.spacing.controlPaddingY + Style.space(2)
+
+    // Flush with the row's left edge, lifted just above it. The width is
+    // fixed rather than content-implied, so the value column never shifts
+    // between models; the card narrows only if the panel itself is narrower.
+    x: 0
+    y: -implicitHeight - Style.space(4)
+    width: Math.min(parent ? parent.width : Style.space(190), Style.space(190))
+
+    background: BorderSurface {
+      color: Color.tooltip.background
+      borderSpec: Border.localOrSurfaceSpec("tooltip", "border", Color.tooltip.border, Color.tooltip.border, Style.normalBorderWidth)
+      radius: Style.cornerRadius
+    }
+
+    contentItem: Column {
+      id: cardBody
+      spacing: Style.space(4)
+
+      Text {
+        textFormat: Text.PlainText
+        text: "TOKENS BY MODEL"
+        width: cardBody.width
+        color: breakdown.entryColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        font.letterSpacing: Style.space(1)
+        elide: Text.ElideRight
+      }
+
+      Repeater {
+        model: breakdown.entries
+
+        Item {
+          required property var modelData
+
+          width: cardBody.width
+          implicitWidth: glyphText.width + Style.space(6) + labelText.implicitWidth
+            + Style.space(12) + valueText.implicitWidth
+          implicitHeight: Math.max(glyphText.implicitHeight, labelText.implicitHeight, valueText.implicitHeight)
+
+          Text {
+            id: glyphText
+            textFormat: Text.PlainText
+            text: modelData.glyph
+            width: Style.space(14)
+            color: breakdown.entryDim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            id: labelText
+            textFormat: Text.PlainText
+            text: modelData.label
+            color: breakdown.entryDim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            elide: Text.ElideRight
+            anchors.left: glyphText.right
+            anchors.leftMargin: Style.space(6)
+            anchors.right: valueText.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            id: valueText
+            textFormat: Text.PlainText
+            text: modelData.value > 0 ? usage.formatTokenCount(modelData.value) : "—"
+            color: breakdown.entryColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+      }
     }
   }
 }
