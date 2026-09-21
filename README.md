@@ -46,7 +46,7 @@ Hovering any model row opens a small card with the tokens behind that model's to
 
 The panel combines provider tabs, today and last-7-days token cards, a daily activity chart, and a model-level token breakdown. The values shown below are real local usage statistics from the captured demo machine; every installation displays its own local records.
 
-![AI Agents Usage panel showing provider tabs, token summary cards, a daily activity chart, and model usage](preview.png)
+![AI Agents Usage panel showing activity stats, token summary cards, a daily activity chart, model usage, and the model token hover card](preview.png)
 
 ## Requirements
 
