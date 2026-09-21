@@ -126,7 +126,7 @@ class TestQmlModelPeriods(unittest.TestCase):
         )
 
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.5.1")
+        self.assertEqual(manifest["version"], "1.5.2")
         providers = manifest["barWidget"]["defaults"]["providers"]
         self.assertEqual(set(providers), {"claude", "codex", "fireworks", "hermes", "grok"})
         self.assertTrue(all(config.get("enabled") is True for config in providers.values()))
