@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.murali-lns.agents-usage",
   "name": "AI Agents Usage",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "author": "Murali-lns",
   "license": "MIT",
   "description": "A native Omarchy bar panel for local usage, limits, pace, and model statistics from Claude Code, Codex, Fireworks, Hermes, and Grok.",
@@ -42,6 +42,7 @@
         }
       },
       "refreshIntervalSec": 900,
+      "defaultProvider": "",
       "syncMode": "Off",
       "syncDir": "",
       "syncFileName": "",
@@ -56,6 +57,13 @@
         "max": 3600,
         "step": 30,
         "defaultValue": 900
+      },
+      {
+        "key": "defaultProvider",
+        "type": "string",
+        "label": "Default tab on open",
+        "defaultValue": "",
+        "description": "Provider id (e.g. hermes) pinned first and selected when the panel opens. Empty keeps the natural order and the last-viewed tab. Editable in the panel's Settings view."
       },
       {
         "key": "syncMode",

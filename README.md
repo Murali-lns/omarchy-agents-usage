@@ -6,6 +6,8 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 
 - Shows available local AI-agent usage records in one bar widget for Claude Code, Codex, Fireworks, Hermes, and Grok.
 - Claude Code, Codex, Fireworks, Hermes, and Grok provider slots are enabled by default; other providers can appear through standard records and Hermes route discovery.
+- Ships an in-panel settings view (gear button or `s`) that pins a **default tab** — the chosen harness is shown first and opened every time — and switches individual harnesses off or on; a switched-off harness disappears from the tabs and bar and is skipped by refresh until it is switched back on.
+- Marks the Hermes tab with the Nous girl artwork from the Hermes desktop app, bundled locally as `assets/hermes.png` plus a light-surface twin; the marks are part of this repository and no network fetch is ever made for them.
 - Displays limits, today and last-7-days token cards, a daily activity chart, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**.
 - Normalizes provider limit records to show only windows actually supplied by upstream providers (session/5-hour, weekly, monthly, reset times, used/limit/remaining, and plan labels).
 - Shows a truthful "Limit unavailable / usage-only" status when a provider lacks a safe official quota source, preserving local usage metrics without fabricating quotas.
@@ -47,6 +49,21 @@ Hovering any model row opens a small card with the tokens behind that model's to
 The panel combines provider tabs, today and last-7-days token cards, a daily activity chart, and a model-level token breakdown. The values shown below are real local usage statistics from the captured demo machine; every installation displays its own local records.
 
 ![AI Agents Usage panel showing activity stats, token summary cards, a daily activity chart, model usage, and the model token hover card](preview.png)
+
+## Settings
+
+A gear button in the panel hero (or the `s` key; Esc returns) opens the in-panel settings view:
+
+- **Harnesses** — an on/off switch per harness: Claude Code, Codex, Fireworks, Hermes, Grok, plus any other discovered route. A switched-off harness disappears from the tabs and the bar, and its collector is skipped until it is switched back on here. If every harness is switched off, the bar icon stays clickable so the settings view remains reachable.
+- **Default tab on open** — pin any enabled harness to the front: it is shown first in the tab row and opened every time the panel opens. **Auto** restores the natural order and opens the last tab you viewed.
+
+Both write through the shell's own widget-settings API into this widget's inline entry in `~/.config/omarchy/shell.json`, so they persist exactly like any other widget setting and survive plugin updates. They can also be set from the CLI:
+
+```bash
+omarchy bar set io.github.murali-lns.agents-usage defaultProvider hermes
+```
+
+(Any harness id works, e.g. `codex`, `grok`; an empty value restores Auto.)
 
 ## Requirements
 

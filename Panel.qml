@@ -71,6 +71,119 @@ Panel {
 
   property bool cursorActive: false
 
+  // ---------------------------------------------------------------- settings
+  //
+  // The settings view edits this widget's inline shell.json entry through the
+  // shell's own settings API (bar.shell.updateEntryInline), so values persist
+  // exactly like CLI-set ones and survive plugin updates. Writes are echoed
+  // locally for the same tick the click happens; the echo drops away once the
+  // injected settings catch up.
+
+  property bool settingsView: false
+  property var settingsOverride: ({})
+
+  readonly property var effectiveSettings: {
+    var base = {}
+    var source = root.settings && typeof root.settings === "object" ? root.settings : ({})
+    for (var key in source) base[key] = source[key]
+    var overrides = root.settingsOverride
+    for (var overrideKey in overrides) base[overrideKey] = overrides[overrideKey]
+    return base
+  }
+
+  onSettingsChanged: root.reconcileSettingsOverride()
+
+  function settingValue(name, fallback) {
+    var value = root.effectiveSettings ? root.effectiveSettings[name] : undefined
+    return value === undefined || value === null ? fallback : value
+  }
+
+  function reconcileSettingsOverride() {
+    var overrides = root.settingsOverride
+    if (!overrides) return
+    var next = {}
+    var changed = false
+    for (var key in overrides) {
+      var current = root.settings ? root.settings[key] : undefined
+      if (JSON.stringify(current) === JSON.stringify(overrides[key])) { changed = true; continue }
+      next[key] = overrides[key]
+    }
+    if (changed) root.settingsOverride = next
+  }
+
+  function persistSettings(changes) {
+    var base = {}
+    if (root.settings && typeof root.settings === "object") {
+      for (var key in root.settings) base[key] = root.settings[key]
+    }
+    for (var changeKey in changes) base[changeKey] = changes[changeKey]
+    var overrides = {}
+    for (var overrideKey in root.settingsOverride) overrides[overrideKey] = root.settingsOverride[overrideKey]
+    for (var echoedKey in changes) overrides[echoedKey] = changes[echoedKey]
+    root.settingsOverride = overrides
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function") {
+      root.bar.shell.updateEntryInline(root.moduleName, base)
+    } else {
+      console.warn("agents/settings", "widget settings API unavailable; change is session-only")
+    }
+  }
+
+  // The harness list mixes the built-in five with anything else that has a
+  // record or an explicit setting, so a toggled-off harness can always be
+  // found and switched back on.
+  readonly property var harnessIds: {
+    var rev = usage.dataRevision
+    var candidates = ["claude", "codex", "fireworks", "hermes", "grok"]
+    var configured = root.settings && root.settings.providers ? root.settings.providers : ({})
+    for (var configuredId in configured) candidates.push(configuredId)
+    var records = usage.knownProviderIds || []
+    for (var i = 0; i < records.length; i++) candidates.push(records[i])
+    var out = []
+    for (var c = 0; c < candidates.length; c++) {
+      var key = String(candidates[c] || "").trim()
+      if (key !== "" && out.indexOf(key) === -1) out.push(key)
+    }
+    return out
+  }
+
+  function harnessEnabled(id) {
+    var providers = root.effectiveSettings && root.effectiveSettings.providers ? root.effectiveSettings.providers : ({})
+    var entry = providers[String(id)]
+    return !entry || entry.enabled !== false
+  }
+
+  function setHarnessEnabled(id, enabled) {
+    var providers = root.effectiveSettings && root.effectiveSettings.providers ? root.effectiveSettings.providers : ({})
+    var next = {}
+    for (var key in providers) next[key] = providers[key]
+    var entry = next[String(id)] && typeof next[String(id)] === "object" ? next[String(id)] : ({})
+    var updated = {}
+    for (var entryKey in entry) updated[entryKey] = entry[entryKey]
+    updated.enabled = enabled === true
+    next[String(id)] = updated
+    root.persistSettings({ providers: next })
+  }
+
+  readonly property string defaultProviderId: String(root.settingValue("defaultProvider", ""))
+
+  function setDefaultProvider(id) {
+    root.persistSettings({ defaultProvider: String(id || "") })
+  }
+
+  // Every open lands on the configured default provider when it is present;
+  // otherwise the previous selection (or the first tab) stays.
+  function applyDefaultProvider() {
+    var wanted = root.defaultProviderId
+    if (wanted === "") return
+    for (var i = 0; i < root.providers.length; i++) {
+      if (root.providers[i].providerId === wanted) {
+        root.selectedProviderId = wanted
+        root.selectedHermesRouteId = "all"
+        return
+      }
+    }
+  }
+
   // Countdowns and "updated" read this instead of Date.now() so the
   // panel keeps telling the truth while it sits open.
   property double nowMs: Date.now()
@@ -476,9 +589,11 @@ Panel {
     return ""
   }
 
-  // Agents that ship a white mark carry an `assets/<id>-light.svg` twin for
+  // Agents that ship a white mark carry an `assets/<id>-light.*` twin for
   // light surfaces; marks that work on both (Claude's brand-orange) ship one
-  // file. The luminance check decides which candidate to try first.
+  // file. The luminance check decides which candidate to try first, and each
+  // variant is looked up as .png before .svg so raster marks (Hermes) and
+  // vector marks (everyone else) share one path.
   function colorChannelLuminance(value) {
     var channel = Number(value)
     if (!isFinite(channel)) return 0
@@ -492,36 +607,52 @@ Panel {
   }
 
   // Marks resolve by convention, so a new agent's data file needs nothing
-  // from this panel: assets/<id>.svg if it ships one, the module's bar glyph
-  // if it doesn't.
+  // from this panel: assets/<id>.png or assets/<id>.svg if it ships one, the
+  // module's bar glyph if it doesn't.
   function iconCandidatesForProvider(p, surfaceColor) {
     if (!p) return []
     var candidates = []
-    if (colorLuminance(surfaceColor || Color.background) >= 0.5)
-      candidates.push(Qt.resolvedUrl("assets/" + p.providerId + "-light.svg"))
-    candidates.push(Qt.resolvedUrl("assets/" + p.providerId + ".svg"))
+    var base = "assets/" + p.providerId
+    if (colorLuminance(surfaceColor || Color.background) >= 0.5) {
+      candidates.push(Qt.resolvedUrl(base + "-light.png"))
+      candidates.push(Qt.resolvedUrl(base + "-light.svg"))
+    }
+    candidates.push(Qt.resolvedUrl(base + ".png"))
+    candidates.push(Qt.resolvedUrl(base + ".svg"))
     return candidates
   }
 
   // Nothing to report, nothing in the bar: Bar.qml collapses a slot whose item
   // is invisible, so the icon appears the moment the first scan finds usage and
   // stays away entirely on a machine that has never produced a usage record.
-  visible: providers.length > 0
+  // It also stays alive whenever a harness is switched off, so an installation
+  // with every harness disabled can still reach the settings view.
+  visible: providers.length > 0 || root.hasDisabledHarnesses
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  readonly property bool hasDisabledHarnesses: {
+    var rev = usage.dataRevision
+    for (var i = 0; i < root.harnessIds.length; i++) {
+      if (!root.harnessEnabled(root.harnessIds[i])) return true
+    }
+    return false
+  }
+
   onProviderIndexChanged: if (panelFlick) panelFlick.contentY = 0
   onOpenedChanged: if (opened) {
+    settingsView = false
     cursorActive = false
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
+    root.applyDefaultProvider()
     usage.refreshLimits()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
   Main {
     id: usage
-    settings: root.settings
+    settings: root.effectiveSettings
   }
 
   // Cheap enough to keep running: it only re-evaluates text bindings, and a
@@ -567,14 +698,14 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(380))
     // Taller than the control panels on purpose: this one is a dashboard, and
     // the whole point is reading limits and history without scrolling.
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
+    contentHeight: panel.fittedContentHeight(root.settingsView ? settingsColumn.implicitHeight : column.implicitHeight, Style.space(640))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
 
       onMoveRequested: function(dx, dy) {
-        if (dx !== 0) {
+        if (dx !== 0 && !root.settingsView) {
           root.cursorActive = true
           root.selectProvider(root.providerIndex + dx)
         }
@@ -582,16 +713,20 @@ Panel {
           panelFlick.contentY = root.clamp(panelFlick.contentY + dy * Style.space(56), 0,
                                            Math.max(0, panelFlick.contentHeight - panelFlick.height))
       }
-      onActivateRequested: root.refreshNow()
-      onCloseRequested: root.close()
+      onActivateRequested: if (!root.settingsView) root.refreshNow()
+      onCloseRequested: if (root.settingsView) root.settingsView = false
+                        else root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(t) { if (t === "r" || t === "R") root.refreshNow() }
+      onTextKey: function(t) {
+        if (t === "r" || t === "R") root.refreshNow()
+        else if (t === "s" || t === "S") root.settingsView = !root.settingsView
+      }
 
       Flickable {
         id: panelFlick
         anchors.fill: parent
         contentWidth: width
-        contentHeight: column.implicitHeight
+        contentHeight: root.settingsView ? settingsColumn.implicitHeight : column.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
@@ -600,18 +735,26 @@ Panel {
 
         Column {
           id: column
+          visible: !root.settingsView
           width: panelFlick.width
           spacing: Style.space(12)
 
-          // ---------- Hero: provider mark · name · plan ----------
-          PanelHero {
-            id: hero
-            visible: !!root.provider
+          // ---------- Hero: provider mark · name · plan · settings ----------
+          Item {
+            id: heroRow
             width: parent.width
-            title: root.provider ? root.provider.providerName : ""
-            meta: root.heroMeta(root.provider)
-            foreground: root.foreground
-            fontFamily: root.fontFamily
+            // The gear stays reachable even with nothing to show, so a
+            // fully-disabled installation can always be switched back on.
+            implicitHeight: Math.max(root.provider ? hero.implicitHeight : 0, settingsButton.implicitHeight)
+
+            PanelHero {
+              id: hero
+              visible: !!root.provider
+              width: parent.width - settingsButton.width - Style.spacing.sm
+              title: root.provider ? root.provider.providerName : ""
+              meta: root.heroMeta(root.provider)
+              foreground: root.foreground
+              fontFamily: root.fontFamily
 
             iconComponent: Component {
               Item {
@@ -636,10 +779,20 @@ Panel {
                   sourceSize.width: Style.font.display * 2
                   sourceSize.height: Style.font.display * 2
                   fillMode: Image.PreserveAspectFit
-                  // Advancing source from inside its own status change trips the
-                  // binding-loop detector; defer the step one tick.
-                  onStatusChanged: if (status === Image.Error && heroMark.candidateIndex < heroMark.candidates.length)
-                    Qt.callLater(function() { heroMark.candidateIndex++ })
+                  // Advancing inside the status change trips the binding-loop
+                  // detector, so the step is deferred — and guarded: a pending
+                  // step from the provider that was showing a tick ago must not
+                  // chase the new provider's walk into the wrong candidate.
+                  onStatusChanged: {
+                    if (status !== Image.Error || heroMark.candidateIndex >= heroMark.candidates.length) return
+                    var keyAtError = heroMark.candidatesKey
+                    var indexAtError = heroMark.candidateIndex
+                    Qt.callLater(function() {
+                      if (heroMark.candidatesKey !== keyAtError) return
+                      if (heroMark.candidateIndex !== indexAtError) return
+                      heroMark.candidateIndex++
+                    })
+                  }
                 }
 
                 Text {
@@ -652,6 +805,23 @@ Panel {
                   font.pixelSize: Style.font.display
                 }
               }
+            }
+          }
+
+            // Opens the settings view: default tab and per-harness switches.
+            Button {
+              id: settingsButton
+              text: "\uf013"
+              selected: root.settingsView
+              bordered: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.bodySmall
+              verticalPadding: Style.space(4)
+              horizontalPadding: Style.space(6)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              onClicked: root.settingsView = !root.settingsView
             }
           }
 
@@ -1136,6 +1306,129 @@ Panel {
             elide: Text.ElideRight
           }
         }
+
+        // ---------- Settings view ----------
+        Column {
+          id: settingsColumn
+          visible: root.settingsView
+          width: panelFlick.width
+          spacing: Style.space(12)
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(settingsBack.implicitHeight, settingsTitle.implicitHeight)
+
+            Button {
+              id: settingsBack
+              text: "Back"
+              bordered: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              verticalPadding: Style.space(4)
+              horizontalPadding: Style.space(8)
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              onClicked: root.settingsView = false
+            }
+
+            PanelSectionHeader {
+              id: settingsTitle
+              text: "SETTINGS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
+          PanelSeparator { foreground: root.foreground }
+
+          PanelSectionHeader {
+            width: parent.width
+            text: "HARNESSES"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Column {
+            id: harnessList
+            width: parent.width
+            spacing: Style.space(8)
+
+            Repeater {
+              model: root.harnessIds
+
+              HarnessRow {
+                required property var modelData
+                width: harnessList.width
+                providerId: modelData
+                displayName: usage.friendlyProviderDisplayName(modelData)
+                checked: root.harnessEnabled(modelData)
+                onToggled: root.setHarnessEnabled(modelData, !checked)
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: "A harness switched off disappears from the panel and bar and stops being collected; switch it back on here anytime."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator { foreground: root.foreground }
+
+          PanelSectionHeader {
+            width: parent.width
+            text: "DEFAULT TAB ON OPEN"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Flow {
+            id: defaultPicker
+            width: parent.width
+            spacing: Style.spacing.sm
+
+            Repeater {
+              model: [""].concat(root.harnessIds)
+
+              Button {
+                required property var modelData
+
+                readonly property string optionId: String(modelData)
+                readonly property bool optionAvailable: optionId === "" || root.harnessEnabled(optionId)
+
+                visible: optionAvailable
+                text: optionId === "" ? "Auto" : usage.friendlyProviderDisplayName(optionId)
+                selected: root.defaultProviderId === optionId
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                verticalPadding: Style.space(4)
+                horizontalPadding: Style.space(8)
+                onClicked: root.setDefaultProvider(optionId)
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: root.defaultProviderId === ""
+              ? "Auto keeps the natural tab order and the last tab you viewed."
+              : "That harness is pinned to the front and opens every time; Auto restores the natural order."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+        }
       }
     }
   }
@@ -1217,6 +1510,91 @@ Panel {
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
+    }
+  }
+
+  // One harness in the settings list: mark and name on the left, the on/off
+  // switch on the right. The row owns the click so the whole line is a hit
+  // target, and the switch stays a pure indicator of the effective state.
+  component HarnessRow: Item {
+    id: harnessRow
+    property string providerId: ""
+    property string displayName: ""
+    property bool checked: true
+    signal toggled()
+
+    implicitHeight: Math.max(rowMark.height, rowLabel.implicitHeight, rowSwitch.implicitHeight) + Style.spacing.md
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.cornerRadius
+      color: root.alpha(root.foreground, rowHover.containsMouse ? 0.08 : 0.04)
+    }
+
+    Image {
+      id: rowMark
+      // Provider objects are rebuilt every refresh; a stub with just the id
+      // is enough for the shared candidate walker.
+      property var candidates: root.iconCandidatesForProvider({ providerId: harnessRow.providerId }, root.surface)
+      property string candidatesKey: candidates.join("\n")
+      property int candidateIndex: 0
+      onCandidatesKeyChanged: candidateIndex = 0
+
+      width: Style.font.body
+      height: Style.font.body
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      source: candidateIndex < candidates.length ? candidates[candidateIndex] : ""
+      sourceSize.width: Style.font.body * 2
+      sourceSize.height: Style.font.body * 2
+      fillMode: Image.PreserveAspectFit
+      // Same deferred, epoch-guarded walk as the hero mark: a stale step from
+      // a previous candidate list must not skip this walk's next candidate.
+      onStatusChanged: {
+        if (status !== Image.Error || candidateIndex >= candidates.length) return
+        var keyAtError = candidatesKey
+        var indexAtError = candidateIndex
+        Qt.callLater(function() {
+          if (candidatesKey !== keyAtError) return
+          if (candidateIndex !== indexAtError) return
+          candidateIndex++
+        })
+      }
+    }
+
+    Text {
+      id: rowLabel
+      textFormat: Text.PlainText
+      text: harnessRow.displayName
+      color: root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.body
+      elide: Text.ElideRight
+      anchors.left: rowMark.right
+      anchors.leftMargin: Style.space(8)
+      anchors.right: rowSwitch.left
+      anchors.rightMargin: Style.spacing.sm
+      anchors.verticalCenter: parent.verticalCenter
+    }
+
+    ToggleSwitch {
+      id: rowSwitch
+      checked: harnessRow.checked
+      interactive: false
+      cursorRing: false
+      foreground: root.foreground
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+    }
+
+    MouseArea {
+      id: rowHover
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: harnessRow.toggled()
     }
   }
 

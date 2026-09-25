@@ -1031,10 +1031,19 @@ class TestHermesCollector(unittest.TestCase):
         self.assertIn("percent = clamp(percent, 0, 1)", panel_qml)
 
     def test_hermes_icon_assets_exist_for_runtime_panel(self):
-        """The live panel must not request missing Hermes image assets."""
+        """The live panel must not request missing Hermes image assets.
+
+        The mark is the Nous girl art: real PNGs (dark- and light-surface
+        variants), not the old letter-mark SVGs the panel used to ship.
+        """
         assets = Path(__file__).parent / "assets"
-        self.assertTrue((assets / "hermes.svg").is_file())
-        self.assertTrue((assets / "hermes-light.svg").is_file())
+        for name in ("hermes.png", "hermes-light.png"):
+            with self.subTest(asset=name):
+                path = assets / name
+                self.assertTrue(path.is_file())
+                self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertFalse((assets / "hermes.svg").exists())
+        self.assertFalse((assets / "hermes-light.svg").exists())
 
     def test_manifest_advertises_requested_provider_slots(self):
         """The UI must keep every supported provider slot enabled by default."""

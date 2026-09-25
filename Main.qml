@@ -683,7 +683,34 @@ Item {
       var syncedDisplay = displayProvider({ id: syncedId, name: stats.providerName || friendlyProviderDisplayName(syncedId) })
       if (providerHasData(syncedDisplay)) result.push(syncedDisplay)
     }
+    // The configured default provider is pinned first so the tab row and the
+    // panel both open on it; everything else keeps its natural order behind it.
+    var pinnedId = String(root.setting("defaultProvider", ""))
+    if (pinnedId !== "") {
+      for (var pin = 1; pin < result.length; pin++) {
+        if (result[pin].providerId === pinnedId) {
+          var movedProvider = result.splice(pin, 1)[0]
+          result.unshift(movedProvider)
+          break
+        }
+      }
+    }
     return result
+  }
+
+  // Every provider id that has a local record, enabled or not — the panel's
+  // settings view lists these so a harness toggled off can be toggled back on.
+  readonly property var knownProviderIds: {
+    var rev = dataRevision
+    var out = []
+    for (var i = 0; i < agents.length; i++) {
+      var record = agents[i] ? agents[i].record : null
+      if (!record || !record.id) continue
+      var id = String(record.id)
+      if (root.isRetiredProviderId(id)) continue
+      out.push(id)
+    }
+    return out
   }
 
   function providerEnabled(id) {
