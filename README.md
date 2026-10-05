@@ -8,7 +8,7 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 - Claude Code, Codex, Fireworks, Hermes, and Grok provider slots are enabled by default; other providers can appear through standard records and Hermes route discovery.
 - Ships an in-panel settings view (gear button or `s`) that pins a **default tab** — the chosen harness is shown first and opened every time — and switches individual harnesses off or on; a switched-off harness disappears from the tabs and bar and is skipped by refresh until it is switched back on.
 - Marks the Hermes tab with the Nous girl artwork from the Hermes desktop app, bundled locally as `assets/hermes.png` plus a light-surface twin; the marks are part of this repository and no network fetch is ever made for them.
-- Displays limits, today and last-7-days token cards, a daily activity chart, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**.
+- Displays limits, today, last-7-days, and all-time token cards, a daily activity chart, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**.
 - Normalizes provider limit records to show only windows actually supplied by upstream providers (session/5-hour, weekly, monthly, reset times, used/limit/remaining, and plan labels).
 - Shows a truthful "Limit unavailable / usage-only" status when a provider lacks a safe official quota source, preserving local usage metrics without fabricating quotas.
 - Collects Hermes TUI usage from the local `~/.hermes/state.db` database in read-only mode.
@@ -46,7 +46,7 @@ Hovering any model row opens a small card with the tokens behind that model's to
 
 ## Interface example
 
-The panel combines provider tabs, today and last-7-days token cards, a daily activity chart, and a model-level token breakdown. The values shown below are real local usage statistics from the captured demo machine; every installation displays its own local records.
+The panel combines provider tabs, today, last-7-days, and all-time token cards, a daily activity chart, and a model-level token breakdown. The values shown below are real local usage statistics from the captured demo machine; every installation displays its own local records.
 
 ![AI Agents Usage panel with the Hermes girl mark and provider tabs (Hermes, Codex, Grok), limit meters, activity stats, token summary cards, and a daily activity chart](preview.png)
 

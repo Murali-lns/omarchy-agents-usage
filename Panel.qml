@@ -445,6 +445,15 @@ Panel {
     return total
   }
 
+  // The All Time card reads the record's cumulative total as published; it
+  // never extrapolates one from the daily window.
+  function allTimeTokenTotal(source) {
+    if (!source) return 0
+    var total = root.safeTokenNumber(source.totalTokens)
+    if (total > 0) return total
+    return root.safeTokenNumber(source.tokens)
+  }
+
   function dayOfMonth(date) {
     var parsed = new Date(String(date || "") + "T00:00:00")
     if (isNaN(parsed.getTime())) return ""
@@ -1142,30 +1151,48 @@ Panel {
             readonly property real peak: Math.max(1, root.weekPeak(root.provider))
             readonly property real todayTokens: root.todayTokenTotal(source)
             readonly property real weekTokens: root.weekTokenTotal(days)
+            readonly property real allTimeTokens: root.allTimeTokenTotal(source)
             visible: !!root.provider && days.length > 0
             width: parent.width
             spacing: Style.spacing.md
 
             // Period cards: today carries the accent fill so the current day
-            // reads first; the seven-day total sits quieter beside it.
+            // reads first; the seven-day and all-time totals sit quieter beside it.
             Row {
               id: usageCards
               width: parent.width
               spacing: Style.spacing.lg
 
-              readonly property real cardWidth: (width - spacing) / 2
+              readonly property real cardWidth: (width - spacing * 2) / 3
+              // Equal heights even when one card's note wraps and another's does not.
+              readonly property real cardHeight: Math.max(todayCard.implicitHeight,
+                weekCard.implicitHeight, allTimeCard.implicitHeight)
 
               UsageCard {
+                id: todayCard
                 width: usageCards.cardWidth
+                height: usageCards.cardHeight
                 title: "Today"
                 value: usageSection.todayTokens
                 highlighted: true
               }
 
               UsageCard {
+                id: weekCard
                 width: usageCards.cardWidth
+                height: usageCards.cardHeight
                 title: "Last 7 Days"
                 value: usageSection.weekTokens
+                highlighted: false
+              }
+
+              UsageCard {
+                id: allTimeCard
+                width: usageCards.cardWidth
+                height: usageCards.cardHeight
+                title: "All Time"
+                value: usageSection.allTimeTokens
+                note: "Recorded total"
                 highlighted: false
               }
             }
@@ -1636,6 +1663,9 @@ Panel {
     id: usageCard
     property string title: ""
     property real value: 0
+    // The mock's longer "observed subtotal" phrasing overflows the card at
+    // large font bases; these two words carry the same provenance note.
+    property string note: "Partial · observed"
     property bool highlighted: false
 
     implicitHeight: cardBody.implicitHeight + Style.spacing.xl * 2
@@ -1662,6 +1692,10 @@ Panel {
           id: cardTitle
           textFormat: Text.PlainText
           text: usageCard.title
+          width: cardCaption.visible
+            ? Math.max(0, parent.width - cardCaption.implicitWidth - Style.space(4))
+            : parent.width
+          elide: Text.ElideRight
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -1674,6 +1708,8 @@ Panel {
           id: cardCaption
           textFormat: Text.PlainText
           text: "TOKENS"
+          // Three cards share the row; drop the caption before the title elides.
+          visible: cardTitle.implicitWidth + implicitWidth + Style.space(4) <= parent.width
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1685,6 +1721,8 @@ Panel {
       Text {
         textFormat: Text.PlainText
         text: usage.formatTokenCount(usageCard.value)
+        width: parent.width
+        elide: Text.ElideRight
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.display
@@ -1693,9 +1731,11 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        // The mock's longer "observed subtotal" phrasing overflows the card at
-        // large font bases; these two words carry the same provenance note.
-        text: "Partial · observed"
+        text: usageCard.note
+        width: parent.width
+        wrapMode: Text.WordWrap
+        maximumLineCount: 2
+        elide: Text.ElideRight
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

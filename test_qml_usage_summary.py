@@ -32,11 +32,22 @@ class TestQmlUsageSummary(unittest.TestCase):
         self.assertIn("return 0", today)
 
     def test_week_card_sums_observed_daily_buckets_without_prorating(self):
-        week = self.block(self.panel, "function weekTokenTotal", "\n  function dayOfMonth")
+        week = self.block(self.panel, "function weekTokenTotal", "\n  // The All Time card")
         self.assertIn("messageCount", week)
         self.assertIn("safeTokenNumber", week)
         self.assertNotIn("totalTokens", week)
         self.assertNotIn("totalPrompts", week)
+
+    def test_all_time_card_reads_the_published_cumulative_total(self):
+        all_time = self.block(self.panel, "function allTimeTokenTotal", "\n  function dayOfMonth")
+        self.assertIn("source.totalTokens", all_time)
+        self.assertIn("safeTokenNumber", all_time)
+        self.assertNotIn("recentDays", all_time)
+        self.assertNotIn("messageCount", all_time)
+        section = self.block(self.panel, "id: usageSection", "// ---------- Models")
+        self.assertIn('title: "All Time"', section)
+        self.assertIn("usageSection.allTimeTokens", section)
+        self.assertIn("(width - spacing * 2) / 3", section)
 
     def test_summary_cards_and_daily_chart_are_wired(self):
         section = self.block(self.panel, "id: usageSection", "// ---------- Models")
