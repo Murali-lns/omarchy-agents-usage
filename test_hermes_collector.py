@@ -724,8 +724,9 @@ class TestHermesCollector(unittest.TestCase):
             ('s1', 'm7', 7, 700, 0, 0, 0, ?, 'google', 'chat_completions'),
             ('s1', 'm8', 8, 800, 0, 0, 0, ?, 'gemini', 'chat_completions'),
             ('s1', 'm9', 9, 900, 0, 0, 0, ?, 'claude', 'anthropic_messages'),
-            ('s1', 'm10', 10, 1000, 0, 0, 0, ?, 'anthropic', 'anthropic_messages')
-        """, (now_ts,) * 10)
+            ('s1', 'm10', 10, 1000, 0, 0, 0, ?, 'anthropic', 'anthropic_messages'),
+            ('s1', 'm12', 11, 1100, 0, 0, 0, ?, 'antigravity', 'chat_completions')
+        """, (now_ts,) * 11)
         conn.execute("""
             INSERT INTO session_model_usage VALUES
             ('s1', 'm11', 7, 700, 0, 0, 0, ?, 'xai-oauth', 'codex_responses')
@@ -772,6 +773,12 @@ class TestHermesCollector(unittest.TestCase):
         self.assertEqual(routes["anthropic"]["label"], "Anthropic")
         self.assertEqual(routes["anthropic"]["tokens"], 1900)
         self.assertEqual(routes["anthropic"]["apiCallCount"], 19)
+
+        # antigravity
+        self.assertIn("antigravity", routes)
+        self.assertEqual(routes["antigravity"]["label"], "Antigravity")
+        self.assertEqual(routes["antigravity"]["tokens"], 1100)
+        self.assertEqual(routes["antigravity"]["apiCallCount"], 11)
 
     def test_same_provider_different_api_mode_aggregation(self):
         """Different billing_mode transport values for the same provider must aggregate into one route."""
@@ -1049,8 +1056,8 @@ class TestHermesCollector(unittest.TestCase):
         """The UI must keep every supported provider slot enabled by default."""
         manifest = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
         providers = manifest["barWidget"]["defaults"]["providers"]
-        self.assertEqual(set(providers), {"claude", "codex", "fireworks", "hermes", "grok"})
-        for provider_id in ("claude", "codex", "fireworks", "hermes", "grok"):
+        self.assertEqual(set(providers), {"claude", "codex", "fireworks", "hermes", "grok", "antigravity"})
+        for provider_id in ("claude", "codex", "fireworks", "hermes", "grok", "antigravity"):
             with self.subTest(provider_id=provider_id):
                 self.assertTrue(providers[provider_id]["enabled"])
 

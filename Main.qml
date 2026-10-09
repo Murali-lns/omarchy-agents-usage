@@ -83,6 +83,12 @@ Item {
     onTriggered: root.killLeaked(grokProcess, grokExitGuard)
   }
   Timer {
+    id: antigravityDeadlineTimer
+    interval: root.collectorDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(antigravityProcess, antigravityExitGuard)
+  }
+  Timer {
     id: modelHistoryDeadlineTimer
     interval: root.collectorDeadlineMs
     repeat: false
@@ -233,6 +239,11 @@ Item {
     onActiveChanged: if (active) grokDeadlineTimer.restart()
   }
   QtObject {
+    id: antigravityExitGuard
+    property bool active: false
+    onActiveChanged: if (active) antigravityDeadlineTimer.restart()
+  }
+  QtObject {
     id: modelHistoryExitGuard
     property bool active: false
     onActiveChanged: if (active) modelHistoryDeadlineTimer.restart()
@@ -251,12 +262,8 @@ Item {
   property var agentIds: []
   property var agents: []
   property int dataRevision: 0
-  // Compatibility guard for records written before the provider was retired;
-  // every other standard record remains generically discoverable.
-  readonly property string retiredProviderId: "antigravity"
-
   function isRetiredProviderId(id) {
-    return String(id || "") === root.retiredProviderId
+    return false
   }
 
   Process {
@@ -489,6 +496,36 @@ Item {
     }
   }
 
+  readonly property string antigravityCollectorPath: {
+    var resolved = Qt.resolvedUrl("antigravity-collector.py").toString().replace(/^file:\/\//, "")
+    if (resolved && resolved.indexOf("/") !== -1) {
+      return resolved
+    }
+    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/antigravity-collector.py"
+  }
+
+  Process {
+    id: antigravityProcess
+    running: false
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
+    onExited: {
+      antigravityExitGuard.active = false
+      root.rescanAgents()
+      root.checkPendingUpdate()
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var message = String(text || "")
+        if (message.length > root.consoleMessageCapChars) message = message.substring(0, root.consoleMessageCapChars)
+        if (message.trim() !== "") console.warn("agents/antigravity", message.trim())
+      }
+    }
+  }
+
   readonly property string modelHistoryCollectorPath: {
     var resolved = Qt.resolvedUrl("model-history-collector.py").toString().replace(/^file:\/\//, "")
     if (resolved && resolved.indexOf("/") !== -1) {
@@ -533,7 +570,7 @@ Item {
 
   function checkPendingUpdate() {
     if (!root.primaryLaunchInProgress && !updateProcess.running && !hermesProcess.running
-        && !grokProcess.running && !modelHistoryProcess.running) {
+        && !grokProcess.running && !antigravityProcess.running && !modelHistoryProcess.running) {
       if (root.modelHistoryRequested) {
         root.modelHistoryRequested = false
         modelHistoryProcess.command = root.modelHistoryCommand()
@@ -568,10 +605,19 @@ Item {
     return false
   }
 
+  function antigravityWanted(agentIds) {
+    if (!providerEnabled("antigravity")) return false
+    if (!agentIds || agentIds.length === 0) return true
+    for (var i = 0; i < agentIds.length; i++) {
+      if (agentIds[i] === "antigravity") return true
+    }
+    return false
+  }
+
   function updateWanted(agentIds) {
     if (!agentIds || agentIds.length === 0) return true
     for (var i = 0; i < agentIds.length; i++) {
-      if (agentIds[i] !== "hermes" && agentIds[i] !== "grok") return true
+      if (agentIds[i] !== "hermes" && agentIds[i] !== "grok" && agentIds[i] !== "antigravity") return true
     }
     return false
   }
@@ -591,6 +637,13 @@ Item {
     return root.supervisedCommand(cmd)
   }
 
+  function antigravityCommand(kind) {
+    var cmd = [root.binPython3, root.antigravityCollectorPath]
+    if (kind === "force") cmd.push("--force")
+    if (kind === "limits") cmd.push("--limits-only")
+    return root.supervisedCommand(cmd)
+  }
+
   function updateCommand(kind, agentIds) {
     var command = [root.omarchyUsageUpdatePath]
     if (kind === "force") command.push("--force")
@@ -602,14 +655,14 @@ Item {
     }
     if (agentIds) {
       for (var i = 0; i < agentIds.length; i++) {
-        if (!root.isRetiredProviderId(agentIds[i]) && agentIds[i] !== "hermes" && agentIds[i] !== "grok") command.push(agentIds[i])
+        if (!root.isRetiredProviderId(agentIds[i]) && agentIds[i] !== "hermes" && agentIds[i] !== "grok" && agentIds[i] !== "antigravity") command.push(agentIds[i])
       }
     }
     return root.supervisedCommand(command)
   }
 
   function runUpdate(kind, agentIds) {
-    if (updateProcess.running || hermesProcess.running || grokProcess.running
+    if (updateProcess.running || hermesProcess.running || grokProcess.running || antigravityProcess.running
         || modelHistoryProcess.running || root.modelHistoryRequested || root.primaryLaunchInProgress) {
       // Collapse queued requests to one full rerun; a forced refresh outranks
       // the cheaper kinds it might have been queued behind.
@@ -635,12 +688,18 @@ Item {
       grokExitGuard.active = true
       grokProcess.running = true
     }
+    if (antigravityWanted(agentIds)) {
+      antigravityProcess.command = antigravityCommand(kind)
+      antigravityExitGuard.active = true
+      antigravityProcess.running = true
+    }
     root.primaryLaunchInProgress = false
     Qt.callLater(root.checkPendingUpdate)
     // A launch flag that no process picked up must not leave its guard armed.
     if (!updateProcess.running) updateExitGuard.active = false
     if (!hermesProcess.running) hermesExitGuard.active = false
     if (!grokProcess.running) grokExitGuard.active = false
+    if (!antigravityProcess.running) antigravityExitGuard.active = false
   }
 
   function refresh() { refreshAll(true) }
@@ -757,6 +816,7 @@ Item {
     if (key === "openrouter") return "OpenRouter"
     if (key === "google" || key === "gemini") return "Google Gemini"
     if (key === "anthropic") return "Anthropic"
+    if (key === "antigravity") return "Antigravity"
     return raw.charAt(0).toUpperCase() + raw.slice(1)
   }
 

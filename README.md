@@ -1,11 +1,11 @@
 # AI Agents Usage for Omarchy
 
-A native Omarchy bar widget and panel for local usage, limits, pace, recent history, and model statistics from available Claude Code, Codex, Fireworks, Hermes, and Grok records.
+A native Omarchy bar widget and panel for local usage, limits, pace, recent history, and model statistics from available Claude Code, Codex, Fireworks, Hermes, Grok, and Antigravity records.
 
 ## What it does
 
-- Shows available local AI-agent usage records in one bar widget for Claude Code, Codex, Fireworks, Hermes, and Grok.
-- Claude Code, Codex, Fireworks, Hermes, and Grok provider slots are enabled by default; other providers can appear through standard records and Hermes route discovery.
+- Shows available local AI-agent usage records in one bar widget for Claude Code, Codex, Fireworks, Hermes, Grok, and Antigravity.
+- Claude Code, Codex, Fireworks, Hermes, Grok, and Antigravity provider slots are enabled by default; other providers can appear through standard records and Hermes route discovery.
 - Ships an in-panel settings view (gear button or `s`) that pins a **default tab** — the chosen harness is shown first and opened every time — and switches individual harnesses off or on; a switched-off harness disappears from the tabs and bar and is skipped by refresh until it is switched back on.
 - Marks the Hermes tab with the Nous girl artwork from the Hermes desktop app, bundled locally as `assets/hermes.png` plus a light-surface twin; the marks are part of this repository and no network fetch is ever made for them.
 - Displays limits, today, last-7-days, and all-time token cards, a daily activity chart, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**.
@@ -20,6 +20,7 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 - Writes Grok’s display record to `~/.local/state/omarchy/agents/usage/grok.json` when the packaged Omarchy Grok collector is absent.
 - The Hermes and Grok collectors never read or send prompt text, message content, API keys, or credentials. Grok SuperGrok weekly/monthly meters come from the Grok CLI (`grok agent --no-leader stdio`, `_x.ai/billing`); the collector does not read `auth.json` or call billing URLs itself.
 - Claude Code, Codex, and Fireworks records are collected through Omarchy’s existing provider tools.
+- Antigravity quota and credit limits are collected from the official CLI (`agy --print /usage` and `/credits`) via a bounded subprocess when Omarchy's native collector is absent.
 - Optional cross-device aggregation is off by default and is enabled only through the user’s explicit widget settings. Snapshot scans are bounded (at most 64 files, 256 KiB per file, 2 MiB per scan); oversized, empty, non-regular, and symlinked entries are skipped, and skipped or truncated input is reported in the panel instead of being loaded. Provider-record discovery likewise runs through a bounded listing helper that streams the directory one entry at a time (at most 256 names emitted from at most 1024 entries examined), and capped scans are reported instead of silently shortened.
 
 The plugin runs with the user’s normal desktop permissions inside the Omarchy shell. Review the source before enabling it, as with every third-party Omarchy plugin.
@@ -54,7 +55,7 @@ The panel combines provider tabs, today, last-7-days, and all-time token cards, 
 
 A gear button in the panel hero (or the `s` key; Esc returns) opens the in-panel settings view:
 
-- **Harnesses** — an on/off switch per harness: Claude Code, Codex, Fireworks, Hermes, Grok, plus any other discovered route. A switched-off harness disappears from the tabs and the bar, and its collector is skipped until it is switched back on here. If every harness is switched off, the bar icon stays clickable so the settings view remains reachable.
+- **Harnesses** — an on/off switch per harness: Claude Code, Codex, Fireworks, Hermes, Grok, Antigravity, plus any other discovered route. A switched-off harness disappears from the tabs and the bar, and its collector is skipped until it is switched back on here. If every harness is switched off, the bar icon stays clickable so the settings view remains reachable.
 - **Default tab on open** — pin any enabled harness to the front: it is shown first in the tab row and opened every time the panel opens. **Auto** restores the natural order and opens the last tab you viewed.
 
 Both write through the shell's own widget-settings API into this widget's inline entry in `~/.config/omarchy/shell.json`, so they persist exactly like any other widget setting and survive plugin updates. They can also be set from the CLI:
@@ -72,6 +73,7 @@ omarchy bar set io.github.murali-lns.agents-usage defaultProvider hermes
 - Omarchy’s built-in agent usage tools for Claude Code, Codex, and Fireworks records.
 - A local Grok CLI home (`~/.grok` or `$GROK_HOME`) for the Grok tab when Omarchy has not yet shipped `omarchy-agent-usage-grok`.
 - A Hermes installation and local `~/.hermes/state.db` are needed for Hermes statistics; the widget remains usable without Hermes.
+- An Antigravity CLI installation (`agy`) is needed for Antigravity quota and credit meters; the widget remains usable without Antigravity.
 
 ## Install
 

@@ -473,6 +473,9 @@ Panel {
 
   function modelUsageSourceFor(p) {
     if (!p) return null
+    // Antigravity's fallback exposes quota/credit status only. Those fields are
+    // never read here; a future native collector may supply the same standard
+    // modelUsage/modelUsageByPeriod token fields as every other provider.
     if (p.providerId === "hermes" && root.selectedHermesRoute) return root.selectedHermesRoute
     return p
   }
@@ -534,8 +537,38 @@ Panel {
     return modelPeriodValues(modelUsageSourceFor(p), root.selectedModelPeriodId) !== null
   }
 
+  function isModelUsagePeriod(id) {
+    return validModelPeriod(id)
+  }
+
+  function isPlainObject(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value)
+  }
+
+  function modelMapHasTokens(values) {
+    if (!isPlainObject(values)) return false
+    for (var modelId in values) {
+      if (tokenParts(values[modelId]).total > 0) return true
+    }
+    return false
+  }
+
+  function modelTokenSourceHasData(p) {
+    var source = modelUsageSourceFor(p)
+    if (!source) return false
+    if (modelMapHasTokens(source.modelUsage) || modelMapHasTokens(source.todayTokensByModel)) return true
+    var periods = source.modelUsageByPeriod
+    if (!isPlainObject(periods)) return false
+    for (var period in periods) {
+      if (isModelUsagePeriod(period) && modelMapHasTokens(periods[period])) return true
+    }
+    return false
+  }
+
   function modelUnavailableText(p) {
     if (!p) return ""
+    if (p.providerId === "antigravity" && !modelTokenSourceHasData(p))
+      return "Model token history unavailable: the documented Antigravity CLI provides quota/credit status, not historical model-token usage."
     if (!modelSourceAvailable(p))
       return "Per-model token source unavailable for " + modelPeriodLabel(root.selectedModelPeriodId) + "."
     if (root.models.length === 0)
@@ -847,14 +880,16 @@ Panel {
           }
 
           // ---------- Provider switch ----------
-          Row {
+          Grid {
             id: providerSwitch
             visible: root.providers.length > 1
             width: parent.width
-            spacing: Style.spacing.md
+            columns: Math.max(1, Math.min(root.providers.length, 4))
+            columnSpacing: Style.spacing.md
+            rowSpacing: Style.spacing.sm
 
-            readonly property real cellWidth: root.providers.length > 0
-              ? (width - spacing * (root.providers.length - 1)) / root.providers.length
+            readonly property real cellWidth: columns > 0
+              ? (width - columnSpacing * (columns - 1)) / columns
               : 0
 
             Repeater {
@@ -872,7 +907,9 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 fontSize: Style.font.bodySmall
+                horizontalPadding: Style.space(6)
                 verticalPadding: Style.spacing.controlPaddingY
+                clip: true
                 onClicked: {
                   root.cursorActive = true
                   root.selectProvider(index)
