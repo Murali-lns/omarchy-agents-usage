@@ -110,7 +110,7 @@ class TestQmlModelPeriods(unittest.TestCase):
 
     def test_antigravity_is_supported_in_manifest_and_processes(self):
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.9.0")
+        self.assertEqual(manifest["version"], "1.9.1")
         providers = manifest["barWidget"]["defaults"]["providers"]
         self.assertEqual(set(providers), {"claude", "codex", "fireworks", "hermes", "grok", "antigravity"})
         self.assertTrue(all(config.get("enabled") is True for config in providers.values()))

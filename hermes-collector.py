@@ -5,8 +5,9 @@
 """Collect Hermes usage into one display-ready JSON record.
 
 Reads the active default profile database under Hermes home directory read-only
-(SQLite URI mode=ro plus PRAGMA query_only=ON), restricts sessions to source=tui,
-aggregates all available TUI history by model and billing route from session_model_usage
+(SQLite URI mode=ro plus PRAGMA query_only=ON), counts every local session source
+(TUI, desktop app, delegated subagents, automation) the way Hermes's own insights
+report does, aggregates all history by model and billing route from session_model_usage
 (including main and aux task rows without double counting), and prints
 and atomically writes the record in the Omarchy record contract.
 """
@@ -385,6 +386,10 @@ def collect_usage() -> dict[str, Any]:
             else "COALESCE(smu.first_seen, s.started_at)"
         )
 
+        # Every session source counts: the desktop app stores its chats under
+        # new labels (local/gui) since the 2026-10 desktop update, and
+        # delegated subagents and automation sources are part of the user's
+        # Hermes usage exactly as hermes insights reports it.
         cur.execute(
             f"""
             SELECT
@@ -400,9 +405,7 @@ def collect_usage() -> dict[str, Any]:
                 {mode_col} AS raw_mode
             FROM session_model_usage smu
             JOIN sessions s ON smu.session_id = s.id
-            WHERE s.source IN (?, ?)
-            """,
-            ("tui", "desktop"),
+            """
         )
         rows = cur.fetchall()
 

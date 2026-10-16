@@ -422,7 +422,7 @@ class TestHermesCollector(unittest.TestCase):
             ('s3', 'deepseek-chat', 1, 50, 50, 0, 0, ?, '', NULL, NULL)
         """, (now_ts,))
 
-        # s4: Non-TUI session (e.g. web/api) - should be ignored!
+        # s4: web/api-labelled session - counted like every local session source
         conn.execute("INSERT INTO sessions VALUES ('s4', 'web', ?)", (now_ts,))
         conn.execute("""
             INSERT INTO session_model_usage VALUES
@@ -434,8 +434,8 @@ class TestHermesCollector(unittest.TestCase):
 
         record = self.collector.collect_usage()
         self.assertTrue(record["ready"])
-        self.assertEqual(record["totalPrompts"], 10)  # 2 + 3 + 4 + 1
-        self.assertEqual(record["totalSessions"], 3)  # s1, s2, s3
+        self.assertEqual(record["totalPrompts"], 109)  # 2 + 3 + 4 + 1 + 99
+        self.assertEqual(record["totalSessions"], 4)  # s1, s2, s3, s4
 
         routes = {r["id"]: r for r in record["routes"]}
         self.assertIn("all", routes)
@@ -446,9 +446,9 @@ class TestHermesCollector(unittest.TestCase):
         # 1. All subscriptions aggregate
         all_r = routes["all"]
         self.assertEqual(all_r["label"], "All subscriptions")
-        self.assertEqual(all_r["tokens"], 1050)
-        self.assertEqual(all_r["apiCallCount"], 10)
-        self.assertEqual(all_r["sessions"], 3)
+        self.assertEqual(all_r["tokens"], 11050)
+        self.assertEqual(all_r["apiCallCount"], 109)
+        self.assertEqual(all_r["sessions"], 4)
         self.assertEqual(all_r["activeDays"], 1)
 
         # 2. Anthropic subscription route
@@ -465,9 +465,9 @@ class TestHermesCollector(unittest.TestCase):
         oai_r = routes["openai"]
         self.assertEqual(oai_r["label"], "OpenAI")
         self.assertEqual(oai_r["billingProvider"], "openai")
-        self.assertEqual(oai_r["tokens"], 500)  # 300 + 200
-        self.assertEqual(oai_r["apiCallCount"], 4)
-        self.assertEqual(oai_r["sessions"], 1)  # s2
+        self.assertEqual(oai_r["tokens"], 10500)  # (300 + 200) + (5000 + 5000)
+        self.assertEqual(oai_r["apiCallCount"], 103)  # 4 + 99
+        self.assertEqual(oai_r["sessions"], 2)  # s2, s4
         self.assertIn("gpt-4o", oai_r["modelUsage"])
 
         # 4. Unattributed route
@@ -476,6 +476,63 @@ class TestHermesCollector(unittest.TestCase):
         self.assertEqual(unatt_r["tokens"], 100)
         self.assertEqual(unatt_r["apiCallCount"], 1)
         self.assertEqual(unatt_r["sessions"], 1)
+
+    def test_every_session_source_counts(self):
+        """All local Hermes session sources count (local, gui, subagent, kanban, oneshot).
+
+        The 2026-10 desktop update stores interactive chats as ``local``/``gui``
+        and delegates work into ``subagent``/``kanban``/``oneshot`` sessions;
+        the record must include every source the way ``hermes insights`` does.
+        """
+        now_ts = time.time()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE session_model_usage (
+                session_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                first_seen REAL,
+                billing_provider TEXT,
+                billing_mode TEXT
+            )
+        """)
+        cases = [
+            ("local-app-chat", "local", "claude-opus-5-5", "anthropic", 100),
+            ("gui-chat", "gui", "deepseek-v4.1-flash", "opencode-go", 200),
+            ("subagent-child", "subagent", "gpt-6.1-sol", "openai-codex", 300),
+            ("kanban-run", "kanban", "gpt-6.1-sol", "openai-codex", 400),
+            ("oneshot-run", "oneshot", "deepseek-v4.1-flash", "opencode-go", 50),
+        ]
+        for session_id, source, model, provider, tokens in cases:
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?)", (session_id, source, now_ts))
+            conn.execute("""
+                INSERT INTO session_model_usage VALUES
+                (?, ?, 1, ?, 0, 0, 0, ?, ?, 'chat_completions')
+            """, (session_id, model, tokens, now_ts, provider))
+        conn.commit()
+        conn.close()
+
+        record = self.collector.collect_usage()
+        self.assertTrue(record["ready"])
+        self.assertEqual(record["totalSessions"], 5)
+        self.assertEqual(record["totalPrompts"], 5)
+        self.assertEqual(record["todayTotalTokens"], 1050)
+
+        routes = {r["id"]: r for r in record["routes"]}
+        self.assertEqual(routes["anthropic"]["tokens"], 100)
+        self.assertEqual(routes["opencode-go"]["tokens"], 250)
+        self.assertEqual(routes["openai-codex"]["tokens"], 700)
 
     def test_secrets_and_billing_base_url_never_output(self):
         """billing_base_url or secret keys must NEVER leak into the record."""
