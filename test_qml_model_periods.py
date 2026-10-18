@@ -55,9 +55,10 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn("modelHistoryProcess.running", pending)
         self.assertIn("grokProcess.running", pending)
         self.assertIn("antigravityProcess.running", pending)
+        self.assertIn("opencodeGoProcess.running", pending)
         self.assertRegex(
             pending,
-            r"!updateProcess\.running\s*&&\s*!hermesProcess\.running\s*&&\s*!grokProcess\.running\s*&&\s*!antigravityProcess\.running\s*&&\s*!modelHistoryProcess\.running",
+            r"!updateProcess\.running\s*&&\s*!hermesProcess\.running\s*&&\s*!grokProcess\.running\s*&&\s*!antigravityProcess\.running\s*&&\s*!opencodeGoProcess\.running\s*&&\s*!modelHistoryProcess\.running",
         )
         self.assertIn("grok-collector.py", self.main)
         self.assertIn("function grokWanted", self.main)
@@ -65,6 +66,9 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn("antigravity-collector.py", self.main)
         self.assertIn("function antigravityWanted", self.main)
         self.assertIn("antigravityProcess.command = antigravityCommand(kind)", self.main)
+        self.assertIn("opencode-go-collector.py", self.main)
+        self.assertIn("function opencodeGoWanted", self.main)
+        self.assertIn("opencodeGoProcess.command = opencodeGoCommand(kind)", self.main)
         self.assertIn("modelHistoryRequested", pending)
         self.assertLess(pending.index("modelHistoryProcess.command ="), pending.index("modelHistoryProcess.running = true"))
         self.assertIn("model-history-collector.py", self.main)
@@ -108,16 +112,22 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn('providerId === "antigravity" && !modelTokenSourceHasData(p)', self.panel)
         self.assertIn("Per-model token source unavailable", self.panel)
 
-    def test_antigravity_is_supported_in_manifest_and_processes(self):
+    def test_manifest_and_primary_collectors_cover_every_supported_provider(self):
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.9.1")
+        self.assertEqual(manifest["version"], "1.10.0")
         providers = manifest["barWidget"]["defaults"]["providers"]
-        self.assertEqual(set(providers), {"claude", "codex", "fireworks", "hermes", "grok", "antigravity"})
+        self.assertEqual(
+            set(providers),
+            {"claude", "codex", "fireworks", "hermes", "grok", "antigravity", "opencode-go"},
+        )
         self.assertTrue(all(config.get("enabled") is True for config in providers.values()))
         self.assertTrue((ROOT / "antigravity-collector.py").exists())
         self.assertIn("antigravity-collector.py", self.main)
         self.assertIn("function antigravityWanted", self.main)
         self.assertIn("function antigravityCommand", self.main)
+        self.assertTrue((ROOT / "opencode-go-collector.py").exists())
+        self.assertIn("opencode-go-collector.py", self.main)
+        self.assertIn("function opencodeGoCommand", self.main)
 
     def test_period_data_propagates_and_hermes_routes_use_provider_route_keys(self):
         self.assertIn("modelUsageByPeriod", self.main)

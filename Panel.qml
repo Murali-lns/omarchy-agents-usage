@@ -133,7 +133,7 @@ Panel {
   // found and switched back on.
   readonly property var harnessIds: {
     var rev = usage.dataRevision
-    var candidates = ["claude", "codex", "fireworks", "hermes", "grok"]
+    var candidates = ["claude", "codex", "fireworks", "hermes", "grok", "opencode-go"]
     var configured = root.settings && root.settings.providers ? root.settings.providers : ({})
     for (var configuredId in configured) candidates.push(configuredId)
     var records = usage.knownProviderIds || []

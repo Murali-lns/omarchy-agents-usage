@@ -5,7 +5,8 @@ import Quickshell.Io
 // The display side of agent usage. Omarchy's updater remains authoritative
 // for packaged collectors; this plugin runs the Hermes collector, a Grok
 // collector that defers to Omarchy when `omarchy-agent-usage-grok` exists,
-// and the supplemental model-history phase. This file discovers standard
+// an OpenCode Go collector for Go quota plus local Go usage, and the
+// supplemental model-history phase. This file discovers standard
 // records through a bounded listing helper, watches them, and merges optional
 // snapshots synced from other machines, bounded by hard file-size, file-count,
 // and entry-type limits. Every spawned command runs under a supervisor that
@@ -87,6 +88,12 @@ Item {
     interval: root.collectorDeadlineMs
     repeat: false
     onTriggered: root.killLeaked(antigravityProcess, antigravityExitGuard)
+  }
+  Timer {
+    id: opencodeGoDeadlineTimer
+    interval: root.collectorDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(opencodeGoProcess, opencodeGoExitGuard)
   }
   Timer {
     id: modelHistoryDeadlineTimer
@@ -242,6 +249,11 @@ Item {
     id: antigravityExitGuard
     property bool active: false
     onActiveChanged: if (active) antigravityDeadlineTimer.restart()
+  }
+  QtObject {
+    id: opencodeGoExitGuard
+    property bool active: false
+    onActiveChanged: if (active) opencodeGoDeadlineTimer.restart()
   }
   QtObject {
     id: modelHistoryExitGuard
@@ -526,6 +538,36 @@ Item {
     }
   }
 
+  readonly property string opencodeGoCollectorPath: {
+    var resolved = Qt.resolvedUrl("opencode-go-collector.py").toString().replace(/^file:\/\//, "")
+    if (resolved && resolved.indexOf("/") !== -1) {
+      return resolved
+    }
+    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/opencode-go-collector.py"
+  }
+
+  Process {
+    id: opencodeGoProcess
+    running: false
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
+    onExited: {
+      opencodeGoExitGuard.active = false
+      root.rescanAgents()
+      root.checkPendingUpdate()
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var message = String(text || "")
+        if (message.length > root.consoleMessageCapChars) message = message.substring(0, root.consoleMessageCapChars)
+        if (message.trim() !== "") console.warn("agents/opencode-go", message.trim())
+      }
+    }
+  }
+
   readonly property string modelHistoryCollectorPath: {
     var resolved = Qt.resolvedUrl("model-history-collector.py").toString().replace(/^file:\/\//, "")
     if (resolved && resolved.indexOf("/") !== -1) {
@@ -570,7 +612,8 @@ Item {
 
   function checkPendingUpdate() {
     if (!root.primaryLaunchInProgress && !updateProcess.running && !hermesProcess.running
-        && !grokProcess.running && !antigravityProcess.running && !modelHistoryProcess.running) {
+        && !grokProcess.running && !antigravityProcess.running && !opencodeGoProcess.running
+        && !modelHistoryProcess.running) {
       if (root.modelHistoryRequested) {
         root.modelHistoryRequested = false
         modelHistoryProcess.command = root.modelHistoryCommand()
@@ -614,10 +657,20 @@ Item {
     return false
   }
 
+  function opencodeGoWanted(agentIds) {
+    if (!providerEnabled("opencode-go")) return false
+    if (!agentIds || agentIds.length === 0) return true
+    for (var i = 0; i < agentIds.length; i++) {
+      if (agentIds[i] === "opencode-go") return true
+    }
+    return false
+  }
+
   function updateWanted(agentIds) {
     if (!agentIds || agentIds.length === 0) return true
     for (var i = 0; i < agentIds.length; i++) {
-      if (agentIds[i] !== "hermes" && agentIds[i] !== "grok" && agentIds[i] !== "antigravity") return true
+      if (agentIds[i] !== "hermes" && agentIds[i] !== "grok" && agentIds[i] !== "antigravity"
+          && agentIds[i] !== "opencode-go") return true
     }
     return false
   }
@@ -644,6 +697,13 @@ Item {
     return root.supervisedCommand(cmd)
   }
 
+  function opencodeGoCommand(kind) {
+    var cmd = [root.binPython3, root.opencodeGoCollectorPath]
+    if (kind === "force") cmd.push("--force")
+    if (kind === "limits") cmd.push("--limits-only")
+    return root.supervisedCommand(cmd)
+  }
+
   function updateCommand(kind, agentIds) {
     var command = [root.omarchyUsageUpdatePath]
     if (kind === "force") command.push("--force")
@@ -655,7 +715,8 @@ Item {
     }
     if (agentIds) {
       for (var i = 0; i < agentIds.length; i++) {
-        if (!root.isRetiredProviderId(agentIds[i]) && agentIds[i] !== "hermes" && agentIds[i] !== "grok" && agentIds[i] !== "antigravity") command.push(agentIds[i])
+        if (!root.isRetiredProviderId(agentIds[i]) && agentIds[i] !== "hermes" && agentIds[i] !== "grok"
+            && agentIds[i] !== "antigravity" && agentIds[i] !== "opencode-go") command.push(agentIds[i])
       }
     }
     return root.supervisedCommand(command)
@@ -693,6 +754,11 @@ Item {
       antigravityExitGuard.active = true
       antigravityProcess.running = true
     }
+    if (opencodeGoWanted(agentIds)) {
+      opencodeGoProcess.command = opencodeGoCommand(kind)
+      opencodeGoExitGuard.active = true
+      opencodeGoProcess.running = true
+    }
     root.primaryLaunchInProgress = false
     Qt.callLater(root.checkPendingUpdate)
     // A launch flag that no process picked up must not leave its guard armed.
@@ -700,6 +766,7 @@ Item {
     if (!hermesProcess.running) hermesExitGuard.active = false
     if (!grokProcess.running) grokExitGuard.active = false
     if (!antigravityProcess.running) antigravityExitGuard.active = false
+    if (!opencodeGoProcess.running) opencodeGoExitGuard.active = false
   }
 
   function refresh() { refreshAll(true) }

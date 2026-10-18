@@ -1,11 +1,11 @@
 # AI Agents Usage for Omarchy
 
-A native Omarchy bar widget and panel for local usage, limits, pace, recent history, and model statistics from available Claude Code, Codex, Fireworks, Hermes, Grok, and Antigravity records.
+A native Omarchy bar widget and panel for local usage, limits, pace, recent history, and model statistics from available Claude Code, Codex, Fireworks, Hermes, Grok, Antigravity, and OpenCode Go records.
 
 ## What it does
 
-- Shows available local AI-agent usage records in one bar widget for Claude Code, Codex, Fireworks, Hermes, Grok, and Antigravity.
-- Claude Code, Codex, Fireworks, Hermes, Grok, and Antigravity provider slots are enabled by default; other providers can appear through standard records and Hermes route discovery.
+- Shows available local AI-agent usage records in one bar widget for Claude Code, Codex, Fireworks, Hermes, Grok, Antigravity, and OpenCode Go.
+- Claude Code, Codex, Fireworks, Hermes, Grok, Antigravity, and OpenCode Go provider slots are enabled by default; other providers can appear through standard records and Hermes route discovery.
 - Ships an in-panel settings view (gear button or `s`) that pins a **default tab** — the chosen harness is shown first and opened every time — and switches individual harnesses off or on; a switched-off harness disappears from the tabs and bar and is skipped by refresh until it is switched back on.
 - Marks the Hermes tab with the Nous girl artwork from the Hermes desktop app, bundled locally as `assets/hermes.png` plus a light-surface twin; the marks are part of this repository and no network fetch is ever made for them.
 - Displays limits, today, last-7-days, and all-time token cards, a daily activity chart, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**.
@@ -21,6 +21,7 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 - The Hermes and Grok collectors never read or send prompt text, message content, API keys, or credentials. Grok SuperGrok weekly/monthly meters come from the Grok CLI (`grok agent --no-leader stdio`, `_x.ai/billing`); the collector does not read `auth.json` or call billing URLs itself.
 - Claude Code, Codex, and Fireworks records are collected through Omarchy’s existing provider tools.
 - Antigravity quota and credit limits are collected from the official CLI (`agy --print /usage` and `/credits`) via a bounded subprocess when Omarchy's native collector is absent.
+- OpenCode Go quota comes from the Go plan's own usage endpoint (`https://opencode.ai/zen/go/v1/usage`) with the Go API key, which the collector reads read-only from `OPENCODE_GO_API_KEY` / `OPENCODE_API_KEY`, `~/.hermes/.env`, or OpenCode's own `~/.local/share/opencode/auth.json`; the key is sent only to that fixed HTTPS endpoint and never written into the record. Local Go token statistics merge the Hermes record's `opencode-go` billing route with the OpenCode CLI's own message metadata (model, provider, token counts, timestamp only).
 - Optional cross-device aggregation is off by default and is enabled only through the user’s explicit widget settings. Snapshot scans are bounded (at most 64 files, 256 KiB per file, 2 MiB per scan); oversized, empty, non-regular, and symlinked entries are skipped, and skipped or truncated input is reported in the panel instead of being loaded. Provider-record discovery likewise runs through a bounded listing helper that streams the directory one entry at a time (at most 256 names emitted from at most 1024 entries examined), and capped scans are reported instead of silently shortened.
 
 The plugin runs with the user’s normal desktop permissions inside the Omarchy shell. Review the source before enabling it, as with every third-party Omarchy plugin.
@@ -74,6 +75,7 @@ omarchy bar set io.github.murali-lns.agents-usage defaultProvider hermes
 - A local Grok CLI home (`~/.grok` or `$GROK_HOME`) for the Grok tab when Omarchy has not yet shipped `omarchy-agent-usage-grok`.
 - A Hermes installation and local `~/.hermes/state.db` are needed for Hermes statistics; the widget remains usable without Hermes.
 - An Antigravity CLI installation (`agy`) is needed for Antigravity quota and credit meters; the widget remains usable without Antigravity.
+- An OpenCode Go subscription and its API key (in `OPENCODE_GO_API_KEY`, `~/.hermes/.env`, or OpenCode's `auth.json`) are needed for the Go tab's quota meters; without a key the tab still reports local OpenCode Go token usage.
 
 ## Install
 
@@ -113,7 +115,7 @@ Every command the plugin runs — the collectors, the shared Omarchy updater, th
 
 ## Privacy and data boundaries
 
-The Hermes collector reads only the active Hermes database path selected by `HERMES_HOME`, or `~/.hermes/state.db` when that variable is unset. It filters to TUI sessions and aggregates counts and token totals by model and discovered provider route. The model-history sidecar reads only standard Omarchy usage JSON records and stores bounded local period totals; it never opens a provider database or transcript. Route/subscription data remains local-only and is deliberately omitted from synced snapshots; synced aggregation contains provider-level count and model totals only. The cross-device scan helper reads at most 64 snapshot files of 256 KiB each within a 2 MiB per-scan budget, rejects symlinked and non-regular entries, and bounds every parsed array, key, string, and number before merging. The repository contains no user database, generated usage JSON, shell configuration, cache, credential, API key, prompt, or message content.
+The Hermes collector reads only the active Hermes database path selected by `HERMES_HOME`, or `~/.hermes/state.db` when that variable is unset. It filters to TUI sessions and aggregates counts and token totals by model and discovered provider route. The OpenCode Go collector resolves the Go API key read-only from `OPENCODE_GO_API_KEY` / `OPENCODE_API_KEY`, `~/.hermes/.env`, or `~/.local/share/opencode/auth.json`, sends it only as an `Authorization` header to the fixed `https://opencode.ai/zen/go/v1/usage` endpoint, and never writes it into a record, a snapshot, or a log; from the OpenCode CLI it reads only numeric message metadata (model id, provider id, token counts, timestamp) and from Hermes only the aggregate `opencode-go` route, never prompts or message content. The model-history sidecar reads only standard Omarchy usage JSON records and stores bounded local period totals; it never opens a provider database or transcript. Route/subscription data remains local-only and is deliberately omitted from synced snapshots; synced aggregation contains provider-level count and model totals only. The cross-device scan helper reads at most 64 snapshot files of 256 KiB each within a 2 MiB per-scan budget, rejects symlinked and non-regular entries, and bounds every parsed array, key, string, and number before merging. The repository contains no user database, generated usage JSON, shell configuration, cache, credential, API key, prompt, or message content.
 
 ## License and attribution
 

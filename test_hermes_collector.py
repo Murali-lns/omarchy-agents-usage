@@ -1113,8 +1113,9 @@ class TestHermesCollector(unittest.TestCase):
         """The UI must keep every supported provider slot enabled by default."""
         manifest = json.loads((Path(__file__).parent / "manifest.json").read_text(encoding="utf-8"))
         providers = manifest["barWidget"]["defaults"]["providers"]
-        self.assertEqual(set(providers), {"claude", "codex", "fireworks", "hermes", "grok", "antigravity"})
-        for provider_id in ("claude", "codex", "fireworks", "hermes", "grok", "antigravity"):
+        expected = {"claude", "codex", "fireworks", "hermes", "grok", "antigravity", "opencode-go"}
+        self.assertEqual(set(providers), expected)
+        for provider_id in sorted(expected):
             with self.subTest(provider_id=provider_id):
                 self.assertTrue(providers[provider_id]["enabled"])
 
