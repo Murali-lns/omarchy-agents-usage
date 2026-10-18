@@ -137,6 +137,11 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn("modelUsageByPeriod", display)
         self.assertIn("modelUsageByPeriod", snapshot)
         self.assertIn("modelUsageByPeriod", aggregate)
+        # The All Time card reads the published cumulative total, which must
+        # survive the record → display and record → snapshot → aggregate paths.
+        self.assertIn("totalTokens", display)
+        self.assertIn("totalTokens", snapshot)
+        self.assertIn("totalTokens", aggregate)
         self.assertIn("modelHistoryPeriodsFor(String(record.id))", snapshot)
         self.assertRegex(self.main, r'String\(providerId\)\s*\+\s*":"\s*\+\s*String\(route\.id\)')
 

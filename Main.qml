@@ -914,6 +914,8 @@ Item {
       recentDays: synced ? (stats.recentDays || []) : (record.recentDays || []),
       totalPrompts: synced ? numberValue(stats.totalPrompts) : numberValue(record.totalPrompts),
       totalSessions: synced ? numberValue(stats.totalSessions) : numberValue(record.totalSessions),
+      // The All Time card reads this published cumulative total.
+      totalTokens: synced ? numberValue(stats.totalTokens) : numberValue(record.totalTokens),
       activeDays: synced ? numberValue(stats.activeDays) : numberValue(record.activeDays),
       modelUsage: source.modelUsage || ({}),
       // Native record/snapshot data wins for any period it supplies. The
@@ -1449,6 +1451,7 @@ Item {
         recentByDay: recentByDay,
         totalPrompts: 0,
         totalSessions: 0,
+        totalTokens: 0,
         activeDays: 0,
         activeDates: ({}),
         modelUsage: ({}),
@@ -1481,6 +1484,9 @@ Item {
         acc.todayTotalTokens = combineNumber(additive, acc.todayTotalTokens, stats.todayTotalTokens)
         acc.totalPrompts = combineNumber(additive, acc.totalPrompts, stats.totalPrompts)
         acc.totalSessions = combineNumber(additive, acc.totalSessions, stats.totalSessions)
+        // Published cumulative totals add up across devices; a record that
+        // never published one keeps the honest zero.
+        acc.totalTokens = combineNumber(additive, acc.totalTokens, stats.totalTokens)
         // Active days overlap between machines, so union the dates rather than
         // summing counts. Snapshots written before activeDates existed only
         // carry a count; the widest one stands in for them.
@@ -1531,6 +1537,7 @@ Item {
         recentDays: recentDays,
         totalPrompts: acc.totalPrompts,
         totalSessions: acc.totalSessions,
+        totalTokens: acc.totalTokens,
         activeDays: Math.max(acc.activeDays, Object.keys(acc.activeDates).length),
         modelUsage: acc.modelUsage,
         modelUsageByPeriod: acc.modelUsageByPeriod,
@@ -1566,6 +1573,7 @@ Item {
       recentDays: cloneValue(record.recentDays, []),
       totalPrompts: numberValue(record.totalPrompts),
       totalSessions: numberValue(record.totalSessions),
+      totalTokens: numberValue(record.totalTokens),
       activeDays: numberValue(record.activeDays),
       activeDates: cloneValue(record.activeDates, []),
       modelUsage: cloneValue(record.modelUsage, ({})),
