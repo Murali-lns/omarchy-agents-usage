@@ -283,6 +283,9 @@ class TestRecordAssembly(unittest.TestCase):
         self.assertTrue(record["hasLocalStats"])
         self.assertEqual(record["limits"], [])
         self.assertEqual(record["todayTotalTokens"], 10)
+        # The All Time card reads this published cumulative total.
+        self.assertEqual(record["totalTokens"], 10)
+        self.assertEqual(record["tokens"], 10)
 
 
 class TestWindowHelpers(unittest.TestCase):

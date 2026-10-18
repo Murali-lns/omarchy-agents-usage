@@ -524,6 +524,12 @@ def collect_usage() -> dict[str, Any]:
         usage_status = MISSING_STATUS
         auth_help = auth_help or AUTH_HELP
 
+    # The panel's All Time card reads the published cumulative total rather
+    # than extrapolating one from the seven-day window.
+    all_time_tokens = sum(
+        sum(bucket.values()) for bucket in local["model_usage"].values()
+    )
+
     record: dict[str, Any] = {
         "schemaVersion": 1,
         "id": AGENT_ID,
@@ -538,6 +544,8 @@ def collect_usage() -> dict[str, Any]:
         "recentDays": local["recent_days"],
         "totalPrompts": local["total_prompts"],
         "totalSessions": local["total_sessions"],
+        "totalTokens": all_time_tokens,
+        "tokens": all_time_tokens,
         "activeDays": local["active_days"],
         "activeDates": local["active_dates"],
         "modelUsage": local["model_usage"],
