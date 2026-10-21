@@ -422,6 +422,8 @@ class TestGrokCollector(unittest.TestCase):
 
     def test_grok_icon_assets_exist_for_runtime_panel(self):
         assets = Path(__file__).parent / "assets"
+        self.assertTrue((assets / "grok.png").is_file())
+        self.assertTrue((assets / "grok-light.png").is_file())
         self.assertTrue((assets / "grok.svg").is_file())
         self.assertTrue((assets / "grok-light.svg").is_file())
 

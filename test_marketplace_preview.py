@@ -25,6 +25,19 @@ class TestMarketplacePreview(unittest.TestCase):
         readme = README_PATH.read_text(encoding="utf-8")
         self.assertIn("](preview.png)", readme)
 
+    def test_theme_gallery_contains_the_three_published_captures(self):
+        readme = README_PATH.read_text(encoding="utf-8")
+        for theme in ("labra", "catppuccin", "catppuccin-latte"):
+            with self.subTest(theme=theme):
+                relative = f"docs/screenshots/{theme}.png"
+                self.assertIn(f"]({relative})", readme)
+                image = (ROOT / relative).read_bytes()
+                self.assertEqual(image[:8], b"\x89PNG\r\n\x1a\n")
+                width, height = struct.unpack(">II", image[16:24])
+                self.assertGreater(width, 0)
+                self.assertGreater(height, 0)
+                self.assertLessEqual(width * height, 40_000_000)
+
 
 if __name__ == "__main__":
     unittest.main()

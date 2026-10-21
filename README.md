@@ -46,11 +46,19 @@ Hovering any model row opens a small card with the tokens behind that model's to
 - The sidecar is local-only, mode `0600`, atomic, and contains only bounded provider/model token aggregates. It never reads transcripts, prompts, conversations, databases, credentials, or endpoints. Native provider records remain authoritative whenever they publish a period.
 - Providers that do not publish model-token history show a generic unavailable message; quota and credit fields are never relabeled as token usage.
 
-## Interface example
+## Interface
 
-The panel combines provider tabs, today, last-7-days, and all-time token cards, a daily activity chart, and a model-level token breakdown. The values shown below are real local usage statistics from the captured demo machine; every installation displays its own local records.
+Version 1.11.0 refreshes the dashboard with a wider layout, clearer provider and subscription filters, usage totals and the daily chart before secondary details, and compact refresh, settings, and close controls. The panel uses an opaque, theme-coloured reading surface without changing global theme settings. Collector logic, token accounting, settings persistence, and process protections are unchanged by this visual refresh.
 
-![AI Agents Usage panel with the Hermes girl mark and provider tabs (Hermes, Codex, Grok), limit meters, activity stats, Today, Last 7 Days, and All Time token cards, and a daily activity chart](preview.png)
+![AI Agents Usage dashboard in Labra, showing provider and subscription filters, Today, Last 7 Days, All Time, daily activity, quota availability, and activity counters](preview.png)
+
+### Theme previews
+
+These are real captures of the same local dashboard after switching Omarchy themes. Backgrounds, text, cards, chart bars, and borders follow the active theme without restarting the shell; the dashboard layout stays the same. Provider artwork keeps its original colours. The screenshot edges are cropped to exclude other windows. The displayed usage belongs to the captured demo machine; every installation shows its own records.
+
+| Labra | Catppuccin | Catppuccin Latte |
+| --- | --- | --- |
+| ![Dashboard in Labra](docs/screenshots/labra.png) | ![Dashboard in Catppuccin dark](docs/screenshots/catppuccin.png) | ![Dashboard in Catppuccin Latte light](docs/screenshots/catppuccin-latte.png) |
 
 ## Settings
 

@@ -111,6 +111,14 @@ class TestQmlSettingsPage(unittest.TestCase):
         schema_keys = [entry.get("key") for entry in self.manifest["barWidget"].get("schema", [])]
         self.assertIn("defaultProvider", schema_keys)
 
+    def test_provider_logo_image_assets_exist(self):
+        """Every supported harness must provide raster PNG marks for runtime panels."""
+        assets = ROOT / "assets"
+        for provider_id in ("claude", "codex", "grok", "hermes", "antigravity"):
+            with self.subTest(provider_id=provider_id):
+                self.assertTrue((assets / f"{provider_id}.png").is_file())
+                self.assertTrue((assets / f"{provider_id}-light.png").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

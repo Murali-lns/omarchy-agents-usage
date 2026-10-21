@@ -13,7 +13,7 @@ Panel {
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
-  readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property color dim: root.alpha(foreground, 0.70)
   readonly property color surface: Color.popups.background
   readonly property color track: Style.selectedFillFor(foreground, Color.accent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -737,10 +737,17 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(380))
+    contentWidth: panel.fittedContentWidth(Style.space(470))
     // Taller than the control panels on purpose: this one is a dashboard, and
     // the whole point is reading limits and history without scrolling.
-    contentHeight: panel.fittedContentHeight(root.settingsView ? settingsColumn.implicitHeight : column.implicitHeight, Style.space(640))
+    contentHeight: panel.fittedContentHeight(root.settingsView ? settingsColumn.implicitHeight : column.implicitHeight, Style.space(740))
+
+    // This data-dense panel needs a solid reading surface. Use the theme's
+    // popup hue without changing the user's global popup opacity or borders.
+    Rectangle {
+      anchors.fill: parent
+      color: Qt.rgba(root.surface.r, root.surface.g, root.surface.b, 1)
+    }
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -779,7 +786,7 @@ Panel {
           id: column
           visible: !root.settingsView
           width: panelFlick.width
-          spacing: Style.space(12)
+          spacing: Style.space(16)
 
           // ---------- Hero: provider mark · name · plan · settings ----------
           Item {
@@ -787,12 +794,12 @@ Panel {
             width: parent.width
             // The gear stays reachable even with nothing to show, so a
             // fully-disabled installation can always be switched back on.
-            implicitHeight: Math.max(root.provider ? hero.implicitHeight : 0, settingsButton.implicitHeight)
+            implicitHeight: Math.max(root.provider ? hero.implicitHeight : 0, headerActions.implicitHeight)
 
             PanelHero {
               id: hero
               visible: !!root.provider
-              width: parent.width - settingsButton.width - Style.spacing.sm
+              width: parent.width - headerActions.width - Style.spacing.lg
               title: root.provider ? root.provider.providerName : ""
               meta: root.heroMeta(root.provider)
               foreground: root.foreground
@@ -811,12 +818,20 @@ Panel {
                 property int candidateIndex: 0
                 onCandidatesKeyChanged: candidateIndex = 0
 
-                width: Style.font.display
-                height: Style.font.display
+                width: Style.space(44)
+                height: Style.space(44)
+
+                Rectangle {
+                  anchors.fill: parent
+                  color: root.alpha(root.foreground, 0.06)
+                  border.color: root.alpha(root.foreground, 0.10)
+                  radius: Style.cornerRadius
+                }
 
                 Image {
                   id: heroMarkImage
                   anchors.fill: parent
+                  anchors.margins: Style.space(5)
                   source: heroMark.candidateIndex < heroMark.candidates.length ? heroMark.candidates[heroMark.candidateIndex] : ""
                   sourceSize.width: Style.font.display * 2
                   sourceSize.height: Style.font.display * 2
@@ -850,20 +865,31 @@ Panel {
             }
           }
 
-            // Opens the settings view: default tab and per-harness switches.
-            Button {
-              id: settingsButton
-              text: "\uf013"
-              selected: root.settingsView
-              bordered: true
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              fontSize: Style.font.bodySmall
-              verticalPadding: Style.space(4)
-              horizontalPadding: Style.space(6)
+            Row {
+              id: headerActions
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              onClicked: root.settingsView = !root.settingsView
+              spacing: Style.space(4)
+
+              DashboardButton {
+                text: "\uf021"
+                tooltipText: "Refresh usage (R)"
+                onClicked: root.refreshNow()
+              }
+
+              DashboardButton {
+                id: settingsButton
+                text: "\uf013"
+                tooltipText: "Settings (S)"
+                selected: root.settingsView
+                onClicked: root.settingsView = !root.settingsView
+              }
+
+              DashboardButton {
+                text: "\uf00d"
+                tooltipText: "Close (Esc)"
+                onClicked: root.close()
+              }
             }
           }
 
@@ -871,7 +897,7 @@ Panel {
             visible: root.providers.length === 0
             width: parent.width
             topPadding: Style.space(24)
-            text: "No AI coding subscriptions found.\nAgents show up here once you've used them."
+            text: "No agent usage yet.\nUse an enabled agent, or check Settings."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -884,18 +910,18 @@ Panel {
             id: providerSwitch
             visible: root.providers.length > 1
             width: parent.width
-            columns: Math.max(1, Math.min(root.providers.length, 4))
-            columnSpacing: Style.spacing.md
-            rowSpacing: Style.spacing.sm
+            columns: Math.max(1, Math.min(root.providers.length, 3))
+            columnSpacing: Style.space(6)
+            rowSpacing: Style.space(6)
 
             readonly property real cellWidth: columns > 0
-              ? (width - columnSpacing * (columns - 1)) / columns
+              ? Math.floor((width - columnSpacing * (columns - 1)) / columns)
               : 0
 
             Repeater {
               model: root.providers
 
-              Button {
+              DashboardButton {
                 required property var modelData
                 required property int index
 
@@ -903,13 +929,9 @@ Panel {
                 text: modelData.providerName
                 selected: index === root.providerIndex
                 hasCursor: root.cursorActive && index === root.providerIndex
-                bordered: true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
                 fontSize: Style.font.bodySmall
-                horizontalPadding: Style.space(6)
-                verticalPadding: Style.spacing.controlPaddingY
-                clip: true
+                horizontalPadding: Style.space(8)
+                verticalPadding: Style.space(7)
                 onClicked: {
                   root.cursorActive = true
                   root.selectProvider(index)
@@ -924,12 +946,12 @@ Panel {
             id: hermesRouteBar
             visible: root.showHermesRouteBar
             width: parent.width
-            spacing: Style.spacing.sm
+            spacing: Style.space(4)
 
             Repeater {
               model: root.hermesRoutes
 
-              Button {
+              DashboardButton {
                 required property var modelData
                 required property int index
 
@@ -937,9 +959,6 @@ Panel {
                 selected: root.selectedHermesRoute
                   ? root.selectedHermesRoute.id === modelData.id
                   : (index === 0)
-                bordered: true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
                 fontSize: Style.font.caption
                 verticalPadding: Style.space(4)
                 horizontalPadding: Style.space(8)
@@ -977,6 +996,114 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
+            }
+          }
+
+          // ---------- Usage ----------
+          PanelSeparator {
+            visible: usageSection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: usageSection
+            readonly property var source: root.activeHermesSource
+            readonly property var days: source ? (source.recentDays || []) : []
+            readonly property real peak: Math.max(1, root.weekPeak(root.provider))
+            readonly property real todayTokens: root.todayTokenTotal(source)
+            readonly property real weekTokens: root.weekTokenTotal(days)
+            readonly property real allTimeTokens: root.allTimeTokenTotal(source)
+            visible: !!root.provider && days.length > 0
+            width: parent.width
+            spacing: Style.spacing.md
+
+            // Period cards: today carries the accent fill so the current day
+            // reads first; the seven-day and all-time totals sit quieter beside it.
+            Row {
+              id: usageCards
+              width: parent.width
+              spacing: Style.space(8)
+
+              readonly property real cardWidth: (width - spacing * 2) / 3
+              // Equal heights even when one card's note wraps and another's does not.
+              readonly property real cardHeight: Math.max(todayCard.implicitHeight,
+                weekCard.implicitHeight, allTimeCard.implicitHeight)
+
+              UsageCard {
+                id: todayCard
+                width: usageCards.cardWidth
+                height: usageCards.cardHeight
+                title: "Today"
+                value: usageSection.todayTokens
+                highlighted: true
+              }
+
+              UsageCard {
+                id: weekCard
+                width: usageCards.cardWidth
+                height: usageCards.cardHeight
+                title: "Last 7 Days"
+                value: usageSection.weekTokens
+                highlighted: false
+              }
+
+              UsageCard {
+                id: allTimeCard
+                width: usageCards.cardWidth
+                height: usageCards.cardHeight
+                title: "All Time"
+                value: usageSection.allTimeTokens
+                note: "Recorded total"
+                highlighted: false
+              }
+            }
+
+            // Daily activity: one column per day, scaled to the week's peak.
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(dailyActivityHeader.implicitHeight, dailyActivitySpan.implicitHeight)
+
+              PanelSectionHeader {
+                id: dailyActivityHeader
+                text: "DAILY ACTIVITY"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                id: dailyActivitySpan
+                textFormat: Text.PlainText
+                text: usageSection.days.length + " days"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            Row {
+              id: dailyActivityChart
+              width: parent.width
+              spacing: 0
+
+              Repeater {
+                model: usageSection.days
+
+                DayColumn {
+                  required property var modelData
+                  required property int index
+
+                  width: dailyActivityChart.width / Math.max(1, usageSection.days.length)
+                  day: modelData
+                  peak: usageSection.peak
+                  // By date, not by position: the Claude stats-cache fallback
+                  // can hand us a window that stops short of today.
+                  today: String(modelData.date || "") === root.todayDate()
+                }
+              }
             }
           }
 
@@ -1128,7 +1255,7 @@ Panel {
                   text: usage.formatTokenCount(hermesActivitySection.apiCalls)
                   color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: Style.font.heading
                   font.bold: true
                 }
               }
@@ -1148,7 +1275,7 @@ Panel {
                   text: String(hermesActivitySection.totalSessions)
                   color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: Style.font.heading
                   font.bold: true
                 }
               }
@@ -1168,116 +1295,8 @@ Panel {
                   text: String(hermesActivitySection.activeDaysCount)
                   color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: Style.font.heading
                   font.bold: true
-                }
-              }
-            }
-          }
-
-          // ---------- Usage ----------
-          PanelSeparator {
-            visible: usageSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: usageSection
-            readonly property var source: root.activeHermesSource
-            readonly property var days: source ? (source.recentDays || []) : []
-            readonly property real peak: Math.max(1, root.weekPeak(root.provider))
-            readonly property real todayTokens: root.todayTokenTotal(source)
-            readonly property real weekTokens: root.weekTokenTotal(days)
-            readonly property real allTimeTokens: root.allTimeTokenTotal(source)
-            visible: !!root.provider && days.length > 0
-            width: parent.width
-            spacing: Style.spacing.md
-
-            // Period cards: today carries the accent fill so the current day
-            // reads first; the seven-day and all-time totals sit quieter beside it.
-            Row {
-              id: usageCards
-              width: parent.width
-              spacing: Style.spacing.lg
-
-              readonly property real cardWidth: (width - spacing * 2) / 3
-              // Equal heights even when one card's note wraps and another's does not.
-              readonly property real cardHeight: Math.max(todayCard.implicitHeight,
-                weekCard.implicitHeight, allTimeCard.implicitHeight)
-
-              UsageCard {
-                id: todayCard
-                width: usageCards.cardWidth
-                height: usageCards.cardHeight
-                title: "Today"
-                value: usageSection.todayTokens
-                highlighted: true
-              }
-
-              UsageCard {
-                id: weekCard
-                width: usageCards.cardWidth
-                height: usageCards.cardHeight
-                title: "Last 7 Days"
-                value: usageSection.weekTokens
-                highlighted: false
-              }
-
-              UsageCard {
-                id: allTimeCard
-                width: usageCards.cardWidth
-                height: usageCards.cardHeight
-                title: "All Time"
-                value: usageSection.allTimeTokens
-                note: "Recorded total"
-                highlighted: false
-              }
-            }
-
-            // Daily activity: one column per day, scaled to the week's peak.
-            Item {
-              width: parent.width
-              implicitHeight: Math.max(dailyActivityHeader.implicitHeight, dailyActivitySpan.implicitHeight)
-
-              PanelSectionHeader {
-                id: dailyActivityHeader
-                text: "DAILY ACTIVITY"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-              }
-
-              Text {
-                id: dailyActivitySpan
-                textFormat: Text.PlainText
-                text: usageSection.days.length + " days"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-              }
-            }
-
-            Row {
-              id: dailyActivityChart
-              width: parent.width
-              spacing: 0
-
-              Repeater {
-                model: usageSection.days
-
-                DayColumn {
-                  required property var modelData
-                  required property int index
-
-                  width: dailyActivityChart.width / Math.max(1, usageSection.days.length)
-                  day: modelData
-                  peak: usageSection.peak
-                  // By date, not by position: the Claude stats-cache fallback
-                  // can hand us a window that stops short of today.
-                  today: String(modelData.date || "") === root.todayDate()
                 }
               }
             }
@@ -1310,15 +1329,12 @@ Panel {
               Repeater {
                 model: root.modelPeriods
 
-                Button {
+                DashboardButton {
                   required property var modelData
 
                   text: modelData.label
                   selected: root.selectedModelPeriodId === String(modelData.id)
                   hasCursor: root.cursorActive && selected
-                  bordered: true
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
                   fontSize: Style.font.caption
                   verticalPadding: Style.space(4)
                   horizontalPadding: Style.space(8)
@@ -1461,7 +1477,7 @@ Panel {
             Repeater {
               model: [""].concat(root.harnessIds)
 
-              Button {
+              DashboardButton {
                 required property var modelData
 
                 readonly property string optionId: String(modelData)
@@ -1470,9 +1486,6 @@ Panel {
                 visible: optionAvailable
                 text: optionId === "" ? "Auto" : usage.friendlyProviderDisplayName(optionId)
                 selected: root.defaultProviderId === optionId
-                bordered: true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
                 fontSize: Style.font.caption
                 verticalPadding: Style.space(4)
                 horizontalPadding: Style.space(8)
@@ -1495,6 +1508,20 @@ Panel {
         }
       }
     }
+  }
+
+  // Quiet, theme-derived controls. Keep the shared Button's focus, hover,
+  // keyboard and tooltip behaviour; only its visual treatment is local.
+  component DashboardButton: Button {
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    fontSize: Style.font.bodySmall
+    horizontalPadding: Style.space(10)
+    verticalPadding: Style.space(6)
+    background: root.alpha(root.foreground, 0.025)
+    borderSpec: Border.flat(root.alpha(root.foreground,
+      selected ? 0.28 : hot || activeFocus ? 0.20 : 0.06), 1)
+    color: root.alpha(root.foreground, selected ? 0.14 : hot || activeFocus ? 0.09 : 0.025)
   }
 
   // A limit window: label and percentage, meter, and reset countdown.
@@ -1628,6 +1655,17 @@ Panel {
     }
 
     Text {
+      anchors.centerIn: rowMark
+      visible: rowMark.status !== Image.Ready
+      textFormat: Text.PlainText
+      text: harnessRow.displayName.slice(0, 1)
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      font.bold: true
+    }
+
+    Text {
       id: rowLabel
       textFormat: Text.PlainText
       text: harnessRow.displayName
@@ -1705,11 +1743,9 @@ Panel {
     property string note: "Partial · observed"
     property bool highlighted: false
 
-    implicitHeight: cardBody.implicitHeight + Style.spacing.xl * 2
-    color: usageCard.highlighted ? root.track : root.alpha(root.foreground, 0.05)
-    borderSpec: Border.flat(usageCard.highlighted
-      ? root.alpha(root.foreground, 0.28)
-      : root.alpha(root.foreground, 0.14), 1)
+    implicitHeight: cardBody.implicitHeight + Style.space(14) * 2
+    color: root.alpha(root.foreground, usageCard.highlighted ? 0.11 : 0.035)
+    borderSpec: Border.flat(root.alpha(root.foreground, usageCard.highlighted ? 0.25 : 0.08), 1)
     radius: Style.cornerRadius
 
     Column {
@@ -1719,7 +1755,7 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: Style.space(10)
       anchors.rightMargin: Style.space(10)
-      spacing: Style.space(2)
+      spacing: Style.space(6)
 
       Item {
         width: parent.width
@@ -1794,7 +1830,7 @@ Panel {
     readonly property real ratio: dayColumn.peak > 0
       ? root.clamp(dayColumn.value / dayColumn.peak, 0, 1)
       : 0
-    readonly property real barMax: Style.space(64)
+    readonly property real barMax: Style.space(76)
     readonly property real barWidth: Math.max(Style.space(10),
       Math.min(Math.round(dayColumn.width * 0.5), Style.space(28)))
     readonly property real barHeight: dayColumn.value > 0
@@ -1824,8 +1860,8 @@ Panel {
       height: dayColumn.barHeight
       radius: Math.min(Style.space(3), Math.round(height / 2))
       color: dayColumn.today ? root.foreground
-        : dayColumn.value > 0 ? root.alpha(root.foreground, 0.5)
-        : root.alpha(root.foreground, 0.2)
+        : dayColumn.value > 0 ? root.alpha(root.foreground, 0.32)
+        : root.alpha(root.foreground, 0.10)
       anchors.horizontalCenter: parent.horizontalCenter
       y: parent.height - labelBlock.implicitHeight - dayColumn.labelGap - height
 
@@ -1883,7 +1919,7 @@ Panel {
     property var row: null
     property real share: 0
 
-    implicitHeight: modelName.implicitHeight + Style.spacing.lg
+    implicitHeight: modelName.implicitHeight + Style.space(18)
 
     Rectangle {
       anchors.fill: parent
@@ -1897,7 +1933,7 @@ Panel {
       anchors.bottom: parent.bottom
       width: parent.width * root.clamp(modelRow.share, 0, 1)
       radius: Style.cornerRadius
-      color: root.alpha(root.foreground, 0.14)
+      color: root.alpha(root.foreground, 0.08)
 
       Behavior on width {
         NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
@@ -1923,7 +1959,7 @@ Panel {
       id: modelTokens
       textFormat: Text.PlainText
       text: modelRow.row ? usage.formatTokenCount(modelRow.row.total) : ""
-      color: root.dim
+      color: root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
       font.bold: true
