@@ -65,6 +65,9 @@ _ATTEMPTS = 3
 _BACKOFF_SECONDS = (0.5, 1.0)
 _REQUEST_TIMEOUT_S = 10.0
 _TRANSIENT_STATUSES = (429, 500, 502, 504)
+# Quota JSON is a few hundred bytes. 64 KiB is the hard cap on bytes taken
+# from the socket before parsing. A larger body is discarded, not buffered.
+_MAX_USAGE_BODY_BYTES = 64 * 1024
 
 _TOKEN_BUCKET_KEYS = (
     "inputTokens",
@@ -257,6 +260,36 @@ def parse_quota_windows(payload: Any, now: float | None = None) -> list[dict[str
     return windows
 
 
+def _declared_body_length(response: Any) -> int | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    raw = headers.get("Content-Length")
+    if raw is None:
+        return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _read_bounded_body(response: Any, limit: int = _MAX_USAGE_BODY_BYTES) -> bytes | None:
+    """Return the body, or None if it exceeds limit.
+
+    ``read(n)`` is the cap: this interpreter does not pull more than ``n``
+    bytes into the process, and closing the response does not drain the rest.
+    A declared Content-Length over the cap skips the read entirely.
+    """
+    declared = _declared_body_length(response)
+    if declared is not None and declared > limit:
+        return None
+    body = response.read(limit + 1)
+    if len(body) > limit:
+        return None
+    return body
+
+
 def _get_json(api_key: str) -> tuple[Any | None, str]:
     """One quota round-trip with retries. Returns (payload, failure reason)."""
     reason = "no-data"
@@ -272,11 +305,15 @@ def _get_json(api_key: str) -> tuple[Any | None, str]:
         )
         try:
             with urllib.request.urlopen(request, timeout=_REQUEST_TIMEOUT_S) as response:
-                body = response.read()
-            try:
-                return json.loads(body), ""
-            except ValueError:
-                reason, retryable = "bad-json", True
+                body = _read_bounded_body(response)
+            if body is None:
+                # A hostile or broken endpoint will not shrink on retry.
+                reason, retryable = "response-too-large", False
+            else:
+                try:
+                    return json.loads(body), ""
+                except ValueError:
+                    reason, retryable = "bad-json", True
         except urllib.error.HTTPError as exc:
             if exc.fp is not None:
                 exc.close()

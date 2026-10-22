@@ -301,5 +301,101 @@ class TestWindowHelpers(unittest.TestCase):
         self.assertEqual(windows[0]["resetsAt"], stamp)
 
 
+class TestBoundedUsageDownload(unittest.TestCase):
+    def test_source_never_reads_the_usage_body_without_a_limit(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("response.read()", source)
+        self.assertIn("response.read(limit + 1)", source)
+        self.assertEqual(collector._MAX_USAGE_BODY_BYTES, 64 * 1024)
+
+    def test_small_json_body_still_parses(self):
+        payload = b'{"usage":{"rolling":{"percent":12}}}'
+        response = _FakeResponse(payload)
+        with mock.patch.object(collector.urllib.request, "urlopen", return_value=response):
+            parsed, reason = collector._get_json("sk-test")
+        self.assertEqual(reason, "")
+        self.assertEqual(parsed["usage"]["rolling"]["percent"], 12)
+        self.assertEqual(response.reads, [collector._MAX_USAGE_BODY_BYTES + 1])
+
+    def test_oversized_body_is_discarded_and_not_retried(self):
+        response = _FakeResponse(b"x" * (collector._MAX_USAGE_BODY_BYTES + 50))
+        with mock.patch.object(collector.urllib.request, "urlopen", return_value=response) as opened:
+            parsed, reason = collector._get_json("sk-test")
+        self.assertIsNone(parsed)
+        self.assertEqual(reason, "response-too-large")
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(response.reads, [collector._MAX_USAGE_BODY_BYTES + 1])
+        self.assertNotIn(None, response.reads)
+
+    def test_declared_length_over_the_cap_never_reads_the_socket(self):
+        response = _FakeResponse(
+            b"{}",
+            headers={"Content-Length": str(collector._MAX_USAGE_BODY_BYTES + 1)},
+        )
+        with mock.patch.object(collector.urllib.request, "urlopen", return_value=response):
+            parsed, reason = collector._get_json("sk-test")
+        self.assertIsNone(parsed)
+        self.assertEqual(reason, "response-too-large")
+        self.assertEqual(response.reads, [])
+
+    def test_real_socket_stops_after_the_cap(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        extra = collector._MAX_USAGE_BODY_BYTES + 8192
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.end_headers()
+                try:
+                    self.wfile.write(b"x" * extra)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
+            def log_message(self, format: str, *args) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        address = server.server_address
+        host, port = str(address[0]), int(address[1])
+        try:
+            with mock.patch.object(collector, "API_URL", f"http://{host}:{port}/usage"):
+                parsed, reason = collector._get_json("sk-test")
+        finally:
+            server.server_close()
+            thread.join(timeout=5)
+        self.assertIsNone(parsed)
+        self.assertEqual(reason, "response-too-large")
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes, headers: dict | None = None):
+        self.body = body
+        self.headers = headers or {}
+        self.reads: list = []
+        self.closed = False
+
+    def read(self, amt=None):
+        self.reads.append(amt)
+        if amt is None:
+            return self.body
+        return self.body[:amt]
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+
 if __name__ == "__main__":
     unittest.main()
