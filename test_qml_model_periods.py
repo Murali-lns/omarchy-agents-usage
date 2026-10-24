@@ -114,7 +114,7 @@ class TestQmlModelPeriods(unittest.TestCase):
 
     def test_manifest_and_primary_collectors_cover_every_supported_provider(self):
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.11.1")
+        self.assertEqual(manifest["version"], "1.11.2")
         providers = manifest["barWidget"]["defaults"]["providers"]
         self.assertEqual(
             set(providers),

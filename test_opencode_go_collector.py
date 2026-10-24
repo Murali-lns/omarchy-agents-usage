@@ -302,16 +302,30 @@ class TestWindowHelpers(unittest.TestCase):
 
 
 class TestBoundedUsageDownload(unittest.TestCase):
-    def test_source_never_reads_the_usage_body_without_a_limit(self):
+    def test_source_never_reads_a_body_without_a_limit(self):
         source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("urllib.request.urlopen", source)
         self.assertNotIn("response.read()", source)
+        self.assertNotIn("fp.read(", source)
         self.assertIn("response.read(limit + 1)", source)
+        self.assertIn("class _RedirectRefused", source)
         self.assertEqual(collector._MAX_USAGE_BODY_BYTES, 64 * 1024)
+
+    def test_redirect_handler_does_not_read_the_body(self):
+        fp = _FakeResponse(b"x" * 100)
+        handler = collector._RedirectRefused()
+        request = collector.urllib.request.Request("https://opencode.ai/zen/go/v1/usage")
+        with self.assertRaises(collector.urllib.error.HTTPError) as caught:
+            handler.http_error_302(request, fp, 302, "Found", {})
+        self.assertEqual(fp.reads, [])
+        caught.exception.close()
+        self.assertEqual(fp.reads, [])
+        self.assertTrue(fp.closed)
 
     def test_small_json_body_still_parses(self):
         payload = b'{"usage":{"rolling":{"percent":12}}}'
         response = _FakeResponse(payload)
-        with mock.patch.object(collector.urllib.request, "urlopen", return_value=response):
+        with mock.patch.object(collector, "_open_usage", return_value=response):
             parsed, reason = collector._get_json("sk-test")
         self.assertEqual(reason, "")
         self.assertEqual(parsed["usage"]["rolling"]["percent"], 12)
@@ -319,7 +333,7 @@ class TestBoundedUsageDownload(unittest.TestCase):
 
     def test_oversized_body_is_discarded_and_not_retried(self):
         response = _FakeResponse(b"x" * (collector._MAX_USAGE_BODY_BYTES + 50))
-        with mock.patch.object(collector.urllib.request, "urlopen", return_value=response) as opened:
+        with mock.patch.object(collector, "_open_usage", return_value=response) as opened:
             parsed, reason = collector._get_json("sk-test")
         self.assertIsNone(parsed)
         self.assertEqual(reason, "response-too-large")
@@ -332,7 +346,7 @@ class TestBoundedUsageDownload(unittest.TestCase):
             b"{}",
             headers={"Content-Length": str(collector._MAX_USAGE_BODY_BYTES + 1)},
         )
-        with mock.patch.object(collector.urllib.request, "urlopen", return_value=response):
+        with mock.patch.object(collector, "_open_usage", return_value=response):
             parsed, reason = collector._get_json("sk-test")
         self.assertIsNone(parsed)
         self.assertEqual(reason, "response-too-large")
@@ -371,6 +385,56 @@ class TestBoundedUsageDownload(unittest.TestCase):
             thread.join(timeout=5)
         self.assertIsNone(parsed)
         self.assertEqual(reason, "response-too-large")
+
+    def test_redirect_with_a_large_body_is_refused_and_not_followed(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        extra = collector._MAX_USAGE_BODY_BYTES + 8192
+        followed = {"hit": False, "requests": 0}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                followed["requests"] += 1
+                if self.path != "/usage":
+                    followed["hit"] = True
+                    body = b'{"usage":{"rolling":{"percent":1}}}'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                body = b"x" * extra
+                self.send_response(302)
+                self.send_header("Location", "/stolen")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
+            def log_message(self, format: str, *args) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        address = server.server_address
+        host, port = str(address[0]), int(address[1])
+        try:
+            with mock.patch.object(collector, "API_URL", f"http://{host}:{port}/usage"):
+                parsed, reason = collector._get_json("sk-test")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        self.assertIsNone(parsed)
+        self.assertEqual(reason, "redirect-refused")
+        self.assertFalse(followed["hit"])
+        self.assertEqual(followed["requests"], 1)
 
 
 class _FakeResponse:

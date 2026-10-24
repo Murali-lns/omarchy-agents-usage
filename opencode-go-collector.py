@@ -290,6 +290,28 @@ def _read_bounded_body(response: Any, limit: int = _MAX_USAGE_BODY_BYTES) -> byt
     return body
 
 
+class _RedirectRefused(urllib.request.HTTPRedirectHandler):
+    """Refuse a 30x before the default handler can buffer its body.
+
+    The stock redirect handler reads that body with no limit before the
+    caller can apply the usage cap. Raising here skips that read. The
+    caller closes the error without reading it.
+    """
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+_USAGE_OPENER = urllib.request.build_opener(_RedirectRefused)
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+
+def _open_usage(request):
+    return _USAGE_OPENER.open(request, timeout=_REQUEST_TIMEOUT_S)
+
+
 def _get_json(api_key: str) -> tuple[Any | None, str]:
     """One quota round-trip with retries. Returns (payload, failure reason)."""
     reason = "no-data"
@@ -304,7 +326,7 @@ def _get_json(api_key: str) -> tuple[Any | None, str]:
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=_REQUEST_TIMEOUT_S) as response:
+            with _open_usage(request) as response:
                 body = _read_bounded_body(response)
             if body is None:
                 # A hostile or broken endpoint will not shrink on retry.
@@ -315,12 +337,15 @@ def _get_json(api_key: str) -> tuple[Any | None, str]:
                 except ValueError:
                     reason, retryable = "bad-json", True
         except urllib.error.HTTPError as exc:
+            code = exc.code
             if exc.fp is not None:
                 exc.close()
-            if exc.code in (401, 403):
+            if code in _REDIRECT_STATUSES:
+                return None, "redirect-refused"
+            if code in (401, 403):
                 return None, "auth-failed"
-            reason = "usage-unavailable" if exc.code == 503 else f"http-{exc.code}"
-            retryable = exc.code in _TRANSIENT_STATUSES or exc.code == 503
+            reason = "usage-unavailable" if code == 503 else f"http-{code}"
+            retryable = code in _TRANSIENT_STATUSES or code == 503
         except Exception as exc:  # noqa: BLE001 - the record reports the failure
             reason = f"fetch-error:{type(exc).__name__}"
             retryable = True
