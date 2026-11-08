@@ -213,10 +213,23 @@ class TestQmlProcessBoundary(unittest.TestCase):
 
     def test_minimal_explicit_environment(self):
         self.assertIn("clearEnvironment: true", self.main)
-        self.assertIn('minimalChildEnv: ({ "HOME": root.home })', self.main)
+        self.assertIn('minimalChildEnv: ({ "HOME": root.home, "OMARCHY_PATH": root.omarchyRoot })', self.main)
         spawns = self.main.count("Process {")
         cleared = self.main.count("clearEnvironment: true")
         self.assertEqual(cleared, spawns)
+
+    def test_stock_collectors_receive_fixed_omarchy_root(self):
+        # Omarchy 4.5 stock collectors raise KeyError without OMARCHY_PATH,
+        # which left Claude and Grok records stale. The root is a fixed
+        # trusted path, never inherited from the shell environment.
+        self.assertIn('readonly property string omarchyRoot: "/usr/share/omarchy"', self.main)
+        self.assertNotIn("OMARCHY_PATH\": Quickshell.env", self.main)
+
+    def test_stock_updater_skips_plugin_owned_providers(self):
+        # The plugin's own Hermes and Antigravity collectors stay the only
+        # writers; the stock updater must not race them or add a duplicate tab.
+        self.assertIn('readonly property var pluginOwnedStockIds: ["hermes", "agy"]', self.main)
+        self.assertIn('command.push("--except", root.pluginOwnedStockIds[s])', self.main)
 
     def test_stream_output_is_capped(self):
         # Every spawn carries producer-side caps through the supervisor;

@@ -50,6 +50,8 @@ Hovering any model row opens a small card with the tokens behind that model's to
 
 Version 1.11.0 refreshes the dashboard with a wider layout, clearer provider and subscription filters, usage totals and the daily chart before secondary details, and compact refresh, settings, and close controls. The panel uses an opaque, theme-coloured reading surface without changing global theme settings. That visual refresh did not change collector logic, token accounting, settings persistence, or process protections.
 
+Version 1.11.3 keeps Claude Code and Grok refreshing on Omarchy 4.5. Omarchy's stock collectors now require `OMARCHY_PATH`, so the plugin passes the fixed `/usr/share/omarchy` root in its otherwise minimal child environment. The stock Hermes and `agy` collectors are skipped, because this plugin's own Hermes and Antigravity collectors already write those records.
+
 Version 1.11.2 refuses a redirect from the usage endpoint instead of reading that reply. Version 1.11.1 caps the final usage download at 64 KiB. A larger reply is discarded before parsing, and the quota is reported unavailable. Local token totals are unchanged.
 
 ![AI Agents Usage dashboard in Labra, showing provider and subscription filters, Today, Last 7 Days, All Time, daily activity, quota availability, and activity counters](preview.png)

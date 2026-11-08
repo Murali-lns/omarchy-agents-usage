@@ -39,12 +39,19 @@ Item {
   readonly property string binBash: "/usr/bin/bash"
   readonly property string binMkdir: "/usr/bin/mkdir"
   readonly property string binPython3: "/usr/bin/python3"
+  readonly property string omarchyRoot: "/usr/share/omarchy"
   readonly property string omarchyUsageUpdatePath: "/usr/share/omarchy/bin/omarchy-agent-usage-update"
+  // Omarchy ships stock collectors under these ids that would write the same
+  // record (hermes) or a duplicate tab (agy, Antigravity) beside this
+  // plugin's own collector, so the stock updater always skips them.
+  readonly property var pluginOwnedStockIds: ["hermes", "agy"]
 
   // Every spawned process resolves its own interpreter the same trusted way
   // (`/usr/bin/bash <script>` or `/usr/bin/python3 <script>`), so shebang
   // lines are never consulted and nothing referenced here resolves via PATH.
-  readonly property var minimalChildEnv: ({ "HOME": root.home })
+  // Omarchy 4.5 stock collectors exit with KeyError when OMARCHY_PATH is
+  // unset, so the fixed trusted Omarchy root is passed alongside HOME.
+  readonly property var minimalChildEnv: ({ "HOME": root.home, "OMARCHY_PATH": root.omarchyRoot })
 
   readonly property int collectorDeadlineMs: 120000
   readonly property int discoveryDeadlineMs: 20000
@@ -713,6 +720,7 @@ Item {
       if (root.isRetiredProviderId(id)) continue
       if (providers[id] && providers[id].enabled === false) command.push("--except", id)
     }
+    for (var s = 0; s < root.pluginOwnedStockIds.length; s++) command.push("--except", root.pluginOwnedStockIds[s])
     if (agentIds) {
       for (var i = 0; i < agentIds.length; i++) {
         if (!root.isRetiredProviderId(agentIds[i]) && agentIds[i] !== "hermes" && agentIds[i] !== "grok"
