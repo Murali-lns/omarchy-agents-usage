@@ -42,13 +42,13 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn('".model-history.json"', self.main)
         self.assertRegex(
             self.main,
-            r'if\s*\(name\s*===\s*"\.model-history\.json"\)\s*continue',
+            r'if\s*\(name\s*===\s*"\.model-history\.json"\)\s*\{\s*history = scan\.entries\[i\]\.raw\s*continue',
         )
-        sidecar = self.block(self.main, "id: modelHistoryFile", "\n  }")
-        self.assertIn("path: root.modelHistoryPath", sidecar)
-        self.assertIn("watchChanges: true", sidecar)
-        self.assertIn("onFileChanged: reload()", sidecar)
-        self.assertIn("parseModelHistory(text())", sidecar)
+        # The sidecar arrives through the bounded record scan, never a FileView.
+        self.assertNotIn("id: modelHistoryFile", self.main)
+        scan = self.block(self.main, "function applyRecordScan(", "\n  function reportRecordScan")
+        self.assertIn("history = scan.entries[i].raw", scan)
+        self.assertIn("parseModelHistory(history)", scan)
 
     def test_history_collector_starts_only_after_all_primary_collectors(self):
         pending = self.block(self.main, "function checkPendingUpdate()", "\n  function hermesWanted")
@@ -114,7 +114,7 @@ class TestQmlModelPeriods(unittest.TestCase):
 
     def test_manifest_and_primary_collectors_cover_every_supported_provider(self):
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.11.3")
+        self.assertEqual(manifest["version"], "1.11.4")
         providers = manifest["barWidget"]["defaults"]["providers"]
         self.assertEqual(
             set(providers),

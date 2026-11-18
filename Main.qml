@@ -6,10 +6,10 @@ import Quickshell.Io
 // for packaged collectors; this plugin runs the Hermes collector, a Grok
 // collector that defers to Omarchy when `omarchy-agent-usage-grok` exists,
 // an OpenCode Go collector for Go quota plus local Go usage, and the
-// supplemental model-history phase. This file discovers standard
-// records through a bounded listing helper, watches them, and merges optional
-// snapshots synced from other machines, bounded by hard file-size, file-count,
-// and entry-type limits. Every spawned command runs under a supervisor that
+// supplemental model-history phase. This file reads the standard records,
+// the model-history sidecar and optional snapshots synced from other machines
+// only through the bounded sync-scan.sh reader (hard file-size, file-count,
+// aggregate and entry-type limits); it never loads a record file whole. Every spawned command runs under a supervisor that
 // owns a dedicated process group, caps both streams at the pipe boundary,
 // and carries a hard deadline with TERM-then-KILL group reaping.
 Item {
@@ -22,7 +22,6 @@ Item {
   readonly property string usageDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agents/usage"
   // This hidden file is supplemental historical model data, never a provider
   // record. Agent discovery explicitly excludes it below.
-  readonly property string modelHistoryPath: usageDir + "/.model-history.json"
   property var modelHistoryData: ({})
   property int modelHistoryRevision: 0
 
@@ -65,6 +64,8 @@ Item {
   // Console text is trimmed to this before console.warn. Display hygiene
   // only — the safety cap is producer-side, not a post-hoc truncation.
   readonly property int consoleMessageCapChars: 400
+  // Provider tabs kept from one record scan (the reader itself keeps at most 64 files).
+  readonly property int maxAgentRecords: 48
 
   Timer {
     id: listDeadlineTimer
@@ -139,16 +140,6 @@ Item {
       return resolved
     }
     return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/supervised-run.sh"
-  }
-
-  // Discovers standard records with producer-side file-count and name bounds
-  // instead of an unbounded directory walk.
-  readonly property string listRecordsScriptPath: {
-    var resolved = Qt.resolvedUrl("list-records.sh").toString().replace(/^file:\/\//, "")
-    if (resolved && resolved.indexOf("/") !== -1) {
-      return resolved
-    }
-    return home + "/.config/omarchy/plugins/io.github.murali-lns.agents-usage/list-records.sh"
   }
 
   // Reaps a terminated child's process group through a bounded, absolute-path
@@ -285,17 +276,20 @@ Item {
     return false
   }
 
+  // Usage records are never read by this shell directly (no FileView, which
+  // loads a whole file): sync-scan.sh reads the folder under hard per-file,
+  // aggregate and file-count bounds, and the supervisor caps its stdout.
   Process {
     id: listProcess
     running: false
-    command: root.supervisedCommand([root.binBash, root.listRecordsScriptPath, root.usageDir])
+    command: root.supervisedCommand([root.binBash, root.syncScanScriptPath, root.usageDir], root.syncScanStdoutCapBytes)
     clearEnvironment: true
     environment: root.minimalChildEnv
     workingDirectory: "/"
 
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.applyAgentListing(text)
+      onStreamFinished: root.applyRecordScan(text)
     }
 
     onExited: listExitGuard.active = false
@@ -312,42 +306,63 @@ Item {
     }
   }
 
-  function applyAgentListing(output) {
-    var ids = []
-    var lines = String(output || "").split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var name = lines[i].trim()
-      if (name === ".model-history.json") continue
-      if (name.indexOf("list-meta ") === 0) {
-        root.reportListMeta(name.slice(10))
-        continue
-      }
-      if (name.slice(-5) === ".json") {
-        var id = name.slice(0, -5)
-        if (!root.isRetiredProviderId(id)) ids.push(id)
-      }
-    }
-    ids.sort()
-    // Same list, same objects: reassigning the model would tear down every
-    // FileView just to build identical ones.
-    if (JSON.stringify(ids) !== JSON.stringify(agentIds)) agentIds = ids
+  // Raw record text per agent id, from the last bounded scan. Agent.qml
+  // parses its own entry only when the text changed.
+  property var recordTexts: ({})
+  property string modelHistoryText: ""
+
+  // Records change when a collector exits (each onExited rescans) or when
+  // Omarchy's own updater writes them; this timer picks up the latter.
+  Timer {
+    interval: 60000
+    running: true
+    repeat: true
+    onTriggered: root.rescanAgents()
   }
 
-  // The bounded listing helper reports its kept/skipped/truncated counts;
-  // a capped scan is surfaced instead of being silently shortened.
-  function reportListMeta(raw) {
-    var meta = null
-    try {
-      meta = JSON.parse(String(raw || ""))
-    } catch (e) {
+  function applyRecordScan(output) {
+    var scan = splitBoundedScan(output)
+    var texts = ({})
+    var ids = []
+    var history = ""
+    var dropped = 0
+    for (var i = 0; i < scan.entries.length; i++) {
+      var name = String(scan.entries[i].path).split("/").pop()
+      if (name === ".model-history.json") {
+        history = scan.entries[i].raw
+        continue
+      }
+      if (name.slice(-5) !== ".json" || name.length > 255) continue
+      var id = name.slice(0, -5)
+      if (root.isRetiredProviderId(id) || texts[id] !== undefined) continue
+      if (ids.length >= root.maxAgentRecords) {
+        dropped++
+        continue
+      }
+      texts[id] = scan.entries[i].raw
+      ids.push(id)
     }
-    if (!meta || typeof meta !== "object") return
-    var skipped = Number(meta.skipped) || 0
-    var truncated = Number(meta.truncated) === 1
-    if (skipped > 0 || truncated)
-      console.warn("agents/list", "provider record listing capped: kept "
-        + String(Number(meta.kept) || 0) + ", skipped " + String(skipped)
-        + (truncated ? ", truncated" : ""))
+    ids.sort()
+    recordTexts = texts
+    // Same list, same objects: reassigning the model would tear down every
+    // Agent just to build identical ones.
+    if (JSON.stringify(ids) !== JSON.stringify(agentIds)) agentIds = ids
+    if (history !== modelHistoryText) {
+      modelHistoryText = history
+      parseModelHistory(history)
+    }
+    reportRecordScan(scan.meta, scan.truncated, dropped)
+  }
+
+  // The bounded reader reports its kept/skipped/truncated counts; a capped
+  // scan is surfaced instead of being silently shortened.
+  function reportRecordScan(meta, scanTruncated, dropped) {
+    var skipped = meta ? (Number(meta.skipped) || 0) : 0
+    var truncated = scanTruncated || (!!meta && Number(meta.truncated) === 1)
+    if (skipped > 0 || truncated || dropped > 0)
+      console.warn("agents/list", "usage record scan capped: kept "
+        + String(meta ? (Number(meta.kept) || 0) : 0) + ", skipped " + String(skipped)
+        + (truncated ? ", truncated" : "") + (dropped > 0 ? ", dropped " + String(dropped) : ""))
   }
 
   Instantiator {
@@ -358,6 +373,7 @@ Item {
       required property var modelData
       agentId: modelData
       path: root.usageDir + "/" + modelData + ".json"
+      rawText: root.recordTexts[modelData] || ""
       onRecordChanged: root.recordsChanged()
     }
 
@@ -1043,9 +1059,12 @@ Item {
     }
   }
 
+  // Write-only: preload is off, so the (possibly synced) target is never
+  // read into this shell. Snapshots are read back only through sync-scan.sh.
   FileView {
     id: syncSnapshotFile
     path: root.syncSnapshotPath
+    preload: false
     watchChanges: false
     atomicWrites: true
     printErrors: false
@@ -1059,25 +1078,13 @@ Item {
     onLoaded: root.detectedHostname = String(text() || "").trim()
   }
 
-  FileView {
-    id: modelHistoryFile
-    path: root.modelHistoryPath
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: root.parseModelHistory(text())
-    onLoadFailed: {
-      root.modelHistoryData = ({})
-      root.modelHistoryRevision++
-    }
-  }
-
+  // Fed by the bounded record scan; an absent file arrives as "".
   function parseModelHistory(content) {
     var parsed = null
     try {
-      parsed = JSON.parse(String(content || ""))
+      if (String(content || "") !== "") parsed = JSON.parse(String(content))
     } catch (e) {
-      console.warn("agents/model-history", "Ignoring bad model history", e)
+      console.warn("agents/model-history", "Ignoring bad model history", String(e).slice(0, 200))
     }
     if (!parsed || typeof parsed !== "object" || !parsed.providers || typeof parsed.providers !== "object") {
       root.modelHistoryData = ({})
@@ -1200,19 +1207,20 @@ Item {
     return value.length > 100 ? value.substring(0, 95) + ".json" : value
   }
 
-  function parseSyncScanOutput(output) {
+  // Splits sync-scan.sh output into {path, raw} entries plus its trailing
+  // meta block. Used for both the usage records and the sync folder.
+  function splitBoundedScan(output) {
     var text = String(output || "")
-    var scanTruncated = false
+    var truncated = false
     if (text.length > root.syncMaxScanChars) {
       text = text.substring(0, root.syncMaxScanChars)
-      scanTruncated = true
+      truncated = true
     }
     var lines = text.split("\n")
-    var snapshots = []
+    var entries = []
+    var meta = null
     var currentPath = ""
     var currentJson = []
-    var meta = null
-    var droppedSnapshots = 0
 
     function flush() {
       if (currentPath === "") return
@@ -1228,16 +1236,7 @@ Item {
         }
         return
       }
-      if (snapshots.length >= root.syncMaxSnapshots) {
-        droppedSnapshots++
-        return
-      }
-      try {
-        var parsed = JSON.parse(raw)
-        if (isPlainObject(parsed) && isPlainObject(parsed.providers)) snapshots.push(parsed)
-      } catch (e) {
-        console.warn("agents/sync", "Ignoring bad snapshot", String(path).slice(0, root.syncMaxStringLength), String(e).slice(0, 200))
-      }
+      entries.push({ path: path, raw: raw })
     }
 
     for (var i = 0; i < lines.length; i++) {
@@ -1256,9 +1255,28 @@ Item {
       if (currentPath !== "") currentJson.push(line)
     }
     flush()
+    return { entries: entries, meta: meta, truncated: truncated }
+  }
+
+  function parseSyncScanOutput(output) {
+    var scan = splitBoundedScan(output)
+    var snapshots = []
+    var droppedSnapshots = 0
+    for (var i = 0; i < scan.entries.length; i++) {
+      if (snapshots.length >= root.syncMaxSnapshots) {
+        droppedSnapshots++
+        continue
+      }
+      try {
+        var parsed = JSON.parse(scan.entries[i].raw)
+        if (isPlainObject(parsed) && isPlainObject(parsed.providers)) snapshots.push(parsed)
+      } catch (e) {
+        console.warn("agents/sync", "Ignoring bad snapshot", String(scan.entries[i].path).slice(0, root.syncMaxStringLength), String(e).slice(0, 200))
+      }
+    }
 
     aggregateData = aggregateSnapshots(snapshots)
-    syncStatusText = syncInputNotice(meta, scanTruncated, droppedSnapshots)
+    syncStatusText = syncInputNotice(scan.meta, scan.truncated, droppedSnapshots)
     syncRevision++
   }
 

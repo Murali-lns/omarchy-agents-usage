@@ -25,10 +25,13 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from types import SimpleNamespace
 from typing import Any, Callable
 
 AGENT_ID = "antigravity"
@@ -39,6 +42,7 @@ CLI_PRINT_TIMEOUT = "8s"
 CLI_TIMEOUT_SECONDS = 15.0
 MAX_OUTPUT_LINE_LENGTH = 512
 MAX_OUTPUT_BYTES = 64 * 1024
+MAX_RECORD_BYTES = 256 * 1024
 CACHE_TTL_SECONDS = 120.0
 
 _USAGE_ROW_RE = re.compile(r"^\s*([0-9]{1,3}(?:\.[0-9]+)?)%\s*$")
@@ -84,11 +88,23 @@ def record_path() -> Path:
     return usage_dir_path() / f"{AGENT_ID}.json"
 
 
+def read_text_capped(path: Path, limit: int) -> str:
+    """Read at most ``limit`` bytes. Larger files raise ValueError.
+
+    The size is judged on what was actually read, so a file that grows after
+    any earlier check still cannot be loaded beyond ``limit + 1`` bytes."""
+    with open(path, "rb") as handle:
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{path.name} is larger than {limit} bytes")
+    return data.decode("utf-8")
+
+
 def record_is_fresh(target: Path | None = None, *, now: datetime | None = None) -> bool:
     """Use a recent adapter record without making another backend request."""
     destination = target or record_path()
     try:
-        payload = json.loads(destination.read_text(encoding="utf-8"))
+        payload = json.loads(read_text_capped(destination, MAX_RECORD_BYTES))
         updated_at = payload.get("updatedAt")
         if not isinstance(updated_at, str):
             return False
@@ -163,11 +179,66 @@ def cli_environment() -> dict[str, str]:
     return env
 
 
+def bounded_run(
+    command: list[str],
+    *,
+    timeout: float = CLI_TIMEOUT_SECONDS,
+    env: dict[str, str] | None = None,
+    limit: int = MAX_OUTPUT_BYTES,
+    **_ignored: Any,
+) -> SimpleNamespace:
+    """A ``subprocess.run`` stand-in that never holds more than ``limit + 1`` bytes.
+
+    ``subprocess.run(capture_output)`` buffers the child's whole stdout before
+    the caller can check its size. Here stdout is read in bounded chunks with
+    a deadline; a child that writes more than ``limit`` bytes is killed and
+    reported as failed (empty output), so its output is never accumulated.
+    stdin and stderr are always closed, and no shell is involved.
+    """
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=env,
+        shell=False,
+    )
+    deadline = time.monotonic() + timeout
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        fd = proc.stdout.fileno()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.25))
+            if not ready:
+                continue
+            chunk = os.read(fd, min(65536, limit + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > limit:
+                proc.kill()
+                proc.wait(timeout=5)
+                return SimpleNamespace(returncode=-1, stdout="")
+        proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except BaseException:
+        proc.kill()
+        proc.wait(timeout=5)
+        raise
+    finally:
+        proc.stdout.close()
+    return SimpleNamespace(returncode=proc.returncode, stdout=b"".join(chunks).decode("utf-8"))
+
+
 def run_cli_command(
     cli_path: str,
     slash_command: str,
     *,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., Any] = bounded_run,
 ) -> str:
     """Run one official slash view and return stdout, never stderr or errors."""
     command = [
@@ -346,7 +417,7 @@ def build_record(usage_output: str, credits_output: str, *, now: datetime | None
 def collect_record(
     cli_path: str,
     *,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., Any] = bounded_run,
 ) -> dict[str, Any]:
     usage_output = run_cli_command(cli_path, "/usage", runner=runner)
     credits_output = run_cli_command(cli_path, "/credits", runner=runner)

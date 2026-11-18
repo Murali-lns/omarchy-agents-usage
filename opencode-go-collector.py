@@ -78,6 +78,9 @@ _TOKEN_BUCKET_KEYS = (
 _MODEL_USAGE_PERIODS = ("today", "7d", "month", "all")
 _MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+/-]{0,127}\Z")
 _MAX_MESSAGES = 200000
+# Local files read whole are capped on the bytes actually read.
+MAX_SMALL_FILE_BYTES = 64 * 1024
+MAX_RECORD_BYTES = 256 * 1024
 
 _PERCENT_KEYS = ("percent", "usagePercent", "usedPercent", "percentUsed", "utilization")
 _USED_KEYS = ("used", "usage", "consumed")
@@ -117,11 +120,23 @@ def _env_api_key() -> str | None:
     return None
 
 
+def read_text_capped(path: Path, limit: int) -> str:
+    """Read at most ``limit`` bytes. Larger files raise ValueError.
+
+    The size is judged on what was actually read, so a file that grows after
+    any earlier check still cannot be loaded beyond ``limit + 1`` bytes."""
+    with open(path, "rb") as handle:
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{path.name} is larger than {limit} bytes")
+    return data.decode("utf-8")
+
+
 def _hermes_env_api_key() -> str | None:
     env_path = Path.home() / ".hermes" / ".env"
     try:
-        text = env_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+        text = read_text_capped(env_path, MAX_SMALL_FILE_BYTES)
+    except (OSError, ValueError):
         return None
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -142,7 +157,7 @@ def _auth_file_api_key() -> str | None:
         candidates.append(Path(xdg_data).expanduser() / "opencode" / "auth.json")
     for path in candidates:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(read_text_capped(path, MAX_SMALL_FILE_BYTES))
         except (OSError, ValueError):
             continue
         if not isinstance(data, dict):
@@ -388,7 +403,7 @@ def _clean_model(raw: Any) -> str:
 def load_hermes_route() -> dict[str, Any] | None:
     """The Hermes record's OpenCode Go billing route, if it exists."""
     try:
-        record = json.loads((usage_dir_path() / "hermes.json").read_text(encoding="utf-8"))
+        record = json.loads(read_text_capped(usage_dir_path() / "hermes.json", MAX_RECORD_BYTES))
     except (OSError, ValueError):
         return None
     routes = record.get("routes")
@@ -425,14 +440,14 @@ def collect_opencode_db(now: datetime) -> dict[str, Any]:
         cursor = conn.execute(
             """
             SELECT
-                json_extract(data, '$.modelID'),
+                substr(json_extract(data, '$.modelID'), 1, 200),
                 json_extract(data, '$.tokens.input'),
                 json_extract(data, '$.tokens.output'),
                 json_extract(data, '$.tokens.reasoning'),
                 json_extract(data, '$.tokens.cache.read'),
                 json_extract(data, '$.tokens.cache.write'),
                 json_extract(data, '$.time.created'),
-                session_id
+                substr(session_id, 1, 128)
             FROM message
             WHERE json_extract(data, '$.providerID') = ?
               AND json_extract(data, '$.role') = 'assistant'

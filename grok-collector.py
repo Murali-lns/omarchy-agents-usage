@@ -41,6 +41,11 @@ AUTH_HELP = "Run `grok login` to authenticate the Grok CLI."
 USAGE_FILE_NAME = "usage.json"
 SUMMARY_FILE_NAME = "summary.json"
 MAX_USAGE_BYTES = 2 * 1024 * 1024
+# Grok's ACP stdio is read with os.read into our own buffer, never readline():
+# one reply line may hold at most MAX_RPC_LINE_BYTES, and one request may pull
+# at most MAX_RPC_READ_BYTES in total (including notifications it skips).
+MAX_RPC_LINE_BYTES = 256 * 1024
+MAX_RPC_READ_BYTES = 1024 * 1024
 MAX_SESSIONS = 4096
 
 _MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+/-]{0,127}\Z")
@@ -239,8 +244,12 @@ def parse_billing(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+class RpcOverflow(RuntimeError):
+    """Grok's ACP output exceeded the per-line or per-request read budget."""
+
+
 def rpc_request(
-    proc: subprocess.Popen[str],
+    proc: subprocess.Popen[bytes],
     request_id: int,
     method: str,
     params: dict[str, Any] | None = None,
@@ -248,29 +257,51 @@ def rpc_request(
 ) -> dict[str, Any]:
     if proc.stdin is None or proc.stdout is None:
         raise RuntimeError("Grok ACP stdio is closed")
-    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}) + "\n")
+    request = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
+    proc.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
     proc.stdin.flush()
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        ready, _, _ = select.select([proc.stdout], [], [], 0.25)
-        if not ready:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
-        try:
-            message = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(message, dict) and message.get("id") == request_id:
-            return message
+    fd = proc.stdout.fileno()
+    # Bytes after the last complete line carry over to the next request.
+    pending = bytearray(getattr(proc, "_rpc_pending", b""))
+    read_total = 0
+    try:
+        while True:
+            newline = pending.find(b"\n")
+            if newline >= 0:
+                line = bytes(pending[:newline])
+                del pending[: newline + 1]
+                try:
+                    message = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(message, dict) and message.get("id") == request_id:
+                    return message
+                continue
+            if len(pending) > MAX_RPC_LINE_BYTES:
+                raise RpcOverflow(f"{method}: reply line over {MAX_RPC_LINE_BYTES} bytes")
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.25))
+            if not ready:
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            read_total += len(chunk)
+            if read_total > MAX_RPC_READ_BYTES:
+                raise RpcOverflow(f"{method}: over {MAX_RPC_READ_BYTES} bytes read")
+            pending += chunk
+    finally:
+        proc._rpc_pending = bytes(pending)  # type: ignore[attr-defined]
     raise TimeoutError(method)
 
 
-def rpc_notify(proc: subprocess.Popen[str], method: str, params: dict[str, Any] | None = None) -> None:
+def rpc_notify(proc: subprocess.Popen[bytes], method: str, params: dict[str, Any] | None = None) -> None:
     if proc.stdin is None:
         raise RuntimeError("Grok ACP stdin is closed")
-    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method, "params": params or {}}) + "\n")
+    proc.stdin.write((json.dumps({"jsonrpc": "2.0", "method": method, "params": params or {}}) + "\n").encode("utf-8"))
     proc.stdin.flush()
 
 
@@ -293,7 +324,6 @@ def collect_limits() -> dict[str, Any]:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
             env=runtime_env(),
         )
     except Exception:
@@ -464,11 +494,21 @@ def _filter_model_usage(raw_usage: dict[str, dict[str, int]]) -> dict[str, dict[
     return out
 
 
+def read_text_capped(path: Path, limit: int) -> str:
+    """Read at most ``limit`` bytes. Larger files raise ValueError.
+
+    The size is judged on what was actually read, so a file that grows after
+    any earlier check still cannot be loaded beyond ``limit + 1`` bytes."""
+    with open(path, "rb") as handle:
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{path.name} is larger than {limit} bytes")
+    return data.decode("utf-8")
+
+
 def _read_json_object(path: Path) -> dict[str, Any] | None:
     try:
-        if path.stat().st_size > MAX_USAGE_BYTES:
-            return None
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(read_text_capped(path, MAX_USAGE_BYTES))
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     return raw if isinstance(raw, dict) else None

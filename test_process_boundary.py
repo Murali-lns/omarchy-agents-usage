@@ -3,7 +3,8 @@
 `supervised-run.sh` owns a dedicated process group per command (PID == PGID
 == SID, verified from /proc before the command runs) and caps both streams at
 the pipe boundary before they can reach the long-lived shell;
-`list-records.sh` bounds record discovery without any external tools;
+`sync-scan.sh` (tested in test_sync_scan_bounds.py) is the only reader of
+usage records and synced snapshots;
 `reap-group.sh` validates group ownership before its TERM/KILL escalation.
 These tests execute the real helpers against disposable fixtures and pin the
 QML wiring that routes every spawn through the supervisor.
@@ -21,11 +22,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent
 SUPERVISOR = ROOT / "supervised-run.sh"
-LISTER = ROOT / "list-records.sh"
 REAPER = ROOT / "reap-group.sh"
 MAIN_PATH = ROOT / "Main.qml"
 
-MAX_FILES = 256
 
 
 def run_supervised(out_cap, err_cap, command, timeout=30):
@@ -239,88 +238,6 @@ class TestSupervisedRunHelper(unittest.TestCase):
                 victim.wait(timeout=10)
 
 
-class TestListRecordsHelper(unittest.TestCase):
-    def test_helper_streams_entries_with_a_pinned_enumerator(self):
-        self.assertTrue(LISTER.is_file())
-        self.assertTrue(os.access(LISTER, os.X_OK))
-        text = LISTER.read_text(encoding="utf-8")
-        self.assertIn("max_files=256", text)
-        self.assertIn("max_name_length=255", text)
-        self.assertIn("max_entries_scanned=1024", text)
-        self.assertIn("find_bin=/usr/bin/find", text)
-        self.assertIn("read -r -d ''", text)
-        self.assertLessEqual(text.count("/usr/bin/"), 1)
-
-    @staticmethod
-    def run_lister(directory):
-        return subprocess.run(
-            ["bash", str(LISTER), str(directory)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-    def test_records_are_listed_with_meta(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            (directory / "claude.json").write_text("{}", encoding="utf-8")
-            (directory / "codex.json").write_text("{}", encoding="utf-8")
-            (directory / ".model-history.json").write_text("{}", encoding="utf-8")
-            result = self.run_lister(directory)
-        self.assertEqual(result.returncode, 0)
-        lines = result.stdout.splitlines()
-        self.assertEqual(sorted(lines[:-1]), ["claude.json", "codex.json"])
-        meta = json.loads(lines[-1].split(" ", 1)[1])
-        self.assertEqual((meta["kept"], meta["skipped"], meta["truncated"]), (2, 0, 0))
-
-    def test_symlinks_directories_and_newline_names_are_skipped(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            directory = base / "usage"
-            directory.mkdir()
-            (directory / "real.json").write_text("{}", encoding="utf-8")
-            outside = base / "outside.json"
-            outside.write_text("{}", encoding="utf-8")
-            (directory / "link.json").symlink_to(outside)
-            (directory / "dir.json").mkdir()
-            (directory / "a\nb.json").write_text("{}", encoding="utf-8")
-            result = self.run_lister(directory)
-        lines = result.stdout.splitlines()
-        self.assertEqual(lines[:-1], ["real.json"])
-        meta = json.loads(lines[-1].split(" ", 1)[1])
-        self.assertEqual((meta["kept"], meta["skipped"], meta["truncated"]), (1, 3, 0))
-
-    def test_file_count_is_capped(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            for i in range(MAX_FILES + 10):
-                (directory / f"dev-{i:03d}.json").write_text("{}", encoding="utf-8")
-            result = self.run_lister(directory)
-        lines = result.stdout.splitlines()
-        self.assertEqual(len(lines) - 1, MAX_FILES)
-        meta = json.loads(lines[-1].split(" ", 1)[1])
-        self.assertEqual((meta["kept"], meta["truncated"]), (MAX_FILES, 1))
-
-    def test_streamed_enumeration_is_bounded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            for i in range(1100):
-                (directory / f"s{i:04d}.json").symlink_to(directory / "target.json")
-            result = self.run_lister(directory)
-        lines = result.stdout.splitlines()
-        meta = json.loads(lines[-1].split(" ", 1)[1])
-        # The consumer stops after the entry cap: no matter how many symlinks
-        # exist, at most max_entries_scanned are ever examined.
-        self.assertEqual((meta["kept"], meta["skipped"], meta["truncated"]), (0, 1024, 1))
-        self.assertEqual(len(lines), 1)
-
-    def test_missing_directory_exits_cleanly(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            result = self.run_lister(Path(tmp) / "nope")
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-
-
 class TestQmlSupervisorWiring(unittest.TestCase):
     """Pins the marketplace process-boundary requirements in Main.qml."""
 
@@ -331,7 +248,7 @@ class TestQmlSupervisorWiring(unittest.TestCase):
     def test_every_spawn_is_routed_through_the_supervisor(self):
         self.assertGreaterEqual(self.main.count("root.supervisedCommand("), 8)
         for needle in (
-            "command: root.supervisedCommand([root.binBash, root.listRecordsScriptPath",
+            "command: root.supervisedCommand([root.binBash, root.syncScanScriptPath, root.usageDir], root.syncScanStdoutCapBytes)",
             "reaperProcess.command = root.supervisedCommand([root.binBash, root.reaperScriptPath",
             "syncMkdirProcess.command = root.supervisedCommand([root.binMkdir",
         ):
@@ -349,7 +266,8 @@ class TestQmlSupervisorWiring(unittest.TestCase):
 
     def test_script_paths_resolve_portably(self):
         self.assertIn('Qt.resolvedUrl("supervised-run.sh")', self.main)
-        self.assertIn('Qt.resolvedUrl("list-records.sh")', self.main)
+        self.assertIn('Qt.resolvedUrl("sync-scan.sh")', self.main)
+        self.assertNotIn("list-records.sh", self.main)
         self.assertIn('Qt.resolvedUrl("reap-group.sh")', self.main)
 
     def test_stderr_is_bounded_producer_side_not_post_hoc(self):
@@ -358,9 +276,12 @@ class TestQmlSupervisorWiring(unittest.TestCase):
         self.assertNotIn("substring(0, root.streamCapBytes)", self.main)
         self.assertIn("producer-side", self.main)
 
-    def test_listing_meta_is_consumed(self):
-        self.assertIn('name.indexOf("list-meta ") === 0', self.main)
-        self.assertIn("function reportListMeta", self.main)
+    def test_record_scan_meta_is_consumed(self):
+        scan = self.main[self.main.index("function applyRecordScan("):]
+        scan = scan[:scan.index("Instantiator {")]
+        self.assertIn("splitBoundedScan(output)", scan)
+        self.assertIn("reportRecordScan(scan.meta, scan.truncated, dropped)", scan)
+        self.assertIn("ids.length >= root.maxAgentRecords", scan)
 
     def test_sync_scan_uses_the_wider_supervised_cap(self):
         self.assertIn("readonly property int syncScanStdoutCapBytes:", self.main)
@@ -384,9 +305,10 @@ class TestQmlSupervisorWiring(unittest.TestCase):
         self.assertIn("onExited: listExitGuard.active = false", self.main)
         self.assertNotIn("ExitGuardReset", self.main)
 
-    def test_supervisor_and_lister_are_referenced_by_the_qml(self):
+    def test_supervisor_and_reader_are_referenced_by_the_qml(self):
         self.assertIn("supervisedRunScriptPath", self.main)
-        self.assertIn("listRecordsScriptPath", self.main)
+        self.assertIn("syncScanScriptPath", self.main)
+        self.assertNotIn("listRecordsScriptPath", self.main)
 
 
 if __name__ == "__main__":

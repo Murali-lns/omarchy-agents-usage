@@ -104,11 +104,26 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def read_text_capped(path: Path, limit: int) -> str:
+    """Read at most ``limit`` bytes. Larger files raise ValueError.
+
+    The size is judged on what was actually read, so a file that grows after
+    any earlier check still cannot be loaded beyond ``limit + 1`` bytes."""
+    with open(path, "rb") as handle:
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{path.name} is larger than {limit} bytes")
+    return data.decode("utf-8")
+
+
 def _load_json_file(path: Path) -> Any:
     try:
-        if path.stat().st_size > MAX_RECORD_BYTES:
-            raise CollectorError("usage source is too large")
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = read_text_capped(path, MAX_RECORD_BYTES)
+        except ValueError as exc:
+            if "larger than" in str(exc):
+                raise CollectorError("usage source is too large") from exc
+            raise
         return json.loads(
             text,
             parse_constant=_reject_json_constant,

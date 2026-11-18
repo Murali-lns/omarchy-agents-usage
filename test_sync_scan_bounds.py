@@ -196,7 +196,7 @@ class TestQmlProcessBoundary(unittest.TestCase):
             'readonly property string binPython3: "/usr/bin/python3"',
             'omarchyUsageUpdatePath: "/usr/share/omarchy/bin/omarchy-agent-usage-update"',
             'readonly property string supervisedRunScriptPath: {',
-            'readonly property string listRecordsScriptPath: {',
+            'readonly property string syncScanScriptPath: {',
             'readonly property string reaperScriptPath: {',
         ):
             self.assertIn(needle, self.main)
@@ -300,10 +300,12 @@ class TestQmlSyncConsumers(unittest.TestCase):
         self.assertNotIn('cat \\"$f\\"', self.main)
 
     def test_parse_side_caps_bound_the_scan_document(self):
+        split = self.block(self.main, "function splitBoundedScan(output)", "\n  function parseSyncScanOutput")
+        self.assertIn("text.substring(0, root.syncMaxScanChars)", split)
+        self.assertIn('=== "sync-meta"', split)
         parse = self.block(self.main, "function parseSyncScanOutput(output)", "\n  function syncInputNotice")
-        self.assertIn("text.substring(0, root.syncMaxScanChars)", parse)
+        self.assertIn("splitBoundedScan(output)", parse)
         self.assertIn("snapshots.length >= root.syncMaxSnapshots", parse)
-        self.assertIn('=== "sync-meta"', parse)
         notice = self.block(self.main, "function syncInputNotice", "\n  function cloneValue")
         self.assertIn("root.syncMaxSnapshots", notice)
 

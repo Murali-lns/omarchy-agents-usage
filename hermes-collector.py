@@ -28,6 +28,16 @@ from typing import Any
 AGENT_ID = "hermes"
 AGENT_NAME = "Hermes"
 DB_NAME = "state" + ".db"
+# The usage query is streamed row by row (never fetchall) and stops after this
+# many rows, newest first, so a huge or hostile database cannot exhaust the
+# collector. A real install has a few thousand rows.
+MAX_USAGE_ROWS = 200_000
+# Text columns are cut in SQL before they reach Python.
+MAX_ID_CHARS = 128
+MAX_MODEL_CHARS = 200
+MAX_ROUTE_CHARS = 64
+# Cached record read back when the database is busy (same cap as the panel's reader).
+MAX_RECORD_BYTES = 256 * 1024
 
 
 def get_hermes_db_path() -> Path:
@@ -35,6 +45,18 @@ def get_hermes_db_path() -> Path:
     if hermes_home:
         return Path(hermes_home).expanduser() / DB_NAME
     return Path.home() / ".hermes" / DB_NAME
+
+
+def read_text_capped(path: Path, limit: int) -> str:
+    """Read at most ``limit`` bytes. Larger files raise ValueError.
+
+    The size is judged on what was actually read, so a file that grows after
+    any earlier check still cannot be loaded beyond ``limit + 1`` bytes."""
+    with open(path, "rb") as handle:
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{path.name} is larger than {limit} bytes")
+    return data.decode("utf-8")
 
 
 def usage_dir_path() -> Path:
@@ -373,8 +395,8 @@ def collect_usage() -> dict[str, Any]:
 
         has_billing_provider = "billing_provider" in smu_cols
         has_billing_mode = "billing_mode" in smu_cols
-        provider_col = "smu.billing_provider" if has_billing_provider else "NULL"
-        mode_col = "smu.billing_mode" if has_billing_mode else "NULL"
+        provider_col = f"substr(smu.billing_provider, 1, {MAX_ROUTE_CHARS})" if has_billing_provider else "NULL"
+        mode_col = f"substr(smu.billing_mode, 1, {MAX_ROUTE_CHARS})" if has_billing_mode else "NULL"
 
         # Day bucketing prefers last_seen (day of most recent activity) so
         # long-lived sessions report on days they actually ran; falls back to
@@ -393,8 +415,8 @@ def collect_usage() -> dict[str, Any]:
         cur.execute(
             f"""
             SELECT
-                s.id,
-                smu.model,
+                substr(s.id, 1, {MAX_ID_CHARS}),
+                substr(smu.model, 1, {MAX_MODEL_CHARS}),
                 COALESCE(smu.api_call_count, 0),
                 COALESCE(smu.input_tokens, 0),
                 COALESCE(smu.output_tokens, 0),
@@ -405,9 +427,22 @@ def collect_usage() -> dict[str, Any]:
                 {mode_col} AS raw_mode
             FROM session_model_usage smu
             JOIN sessions s ON smu.session_id = s.id
-            """
+            ORDER BY smu.rowid DESC
+            LIMIT ?
+            """,
+            (MAX_USAGE_ROWS + 1,),
         )
-        rows = cur.fetchall()
+        truncated = False
+
+        def bounded_rows():
+            nonlocal truncated
+            for index, row in enumerate(cur):
+                if index >= MAX_USAGE_ROWS:
+                    truncated = True
+                    return
+                yield row
+
+        rows = bounded_rows()
 
         all_sessions = set()
         all_today_sessions = set()
@@ -643,7 +678,7 @@ def collect_usage() -> dict[str, Any]:
             "modelUsageByPeriod": model_usage_by_period,
             "limits": [],
             "tierLabel": "",
-            "usageStatusText": "",
+            "usageStatusText": f"Showing the newest {MAX_USAGE_ROWS} usage rows" if truncated else "",
             "authHelpText": "",
             "routes": routes,
         }
@@ -651,7 +686,7 @@ def collect_usage() -> dict[str, Any]:
         target_path = usage_dir_path() / f"{AGENT_ID}.json"
         if target_path.is_file():
             try:
-                cached = json.loads(target_path.read_text(encoding="utf-8"))
+                cached = json.loads(read_text_capped(target_path, MAX_RECORD_BYTES))
                 cached["usageStatusText"] = f"Hermes database busy: {exc}"
                 return cached
             except Exception:

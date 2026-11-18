@@ -1,5 +1,9 @@
 #!/bin/bash
-# Bounded cross-device sync scan for the AI Agents Usage plugin.
+# Bounded JSON folder reader for the AI Agents Usage plugin.
+#
+# The only way the plugin reads JSON files: Main.qml runs it on the local
+# usage-record folder (provider records and .model-history.json) and on the
+# cross-device sync folder. No record is ever loaded whole by the shell.
 #
 # Emits one already-bounded stream: per-file, aggregate, and file-count
 # limits are enforced before any data leaves this helper, so the caller
