@@ -8,7 +8,7 @@ A native Omarchy bar widget and panel for local usage, limits, pace, recent hist
 - Claude Code, Codex, Fireworks, Hermes, Grok, Antigravity, and OpenCode Go provider slots are enabled by default; other providers can appear through standard records and Hermes route discovery.
 - Ships an in-panel settings view (gear button or `s`) that pins a **default tab** — the chosen harness is shown first and opened every time — and switches individual harnesses off or on; a switched-off harness disappears from the tabs and bar and is skipped by refresh until it is switched back on.
 - Marks the Hermes tab with the Nous girl artwork from the Hermes desktop app, bundled locally as `assets/hermes.png` plus a light-surface twin; the marks are part of this repository and no network fetch is ever made for them.
-- Displays limits, today, last-7-days, and all-time token cards, a daily activity chart, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**.
+- Displays limits, today, last-7-days, and all-time token cards, a daily activity chart, and model token breakdowns with four model-period filters: **Today**, **7 days**, **1 month** (rolling 30 days), and **All time**. The Claude Code tab adds an **API equiv.** card: what its all-time tokens would cost at Anthropic API list prices.
 - Normalizes provider limit records to show only windows actually supplied by upstream providers (session/5-hour, weekly, monthly, reset times, used/limit/remaining, and plan labels).
 - Shows a truthful "Limit unavailable / usage-only" status when a provider lacks a safe official quota source, preserving local usage metrics without fabricating quotas.
 - Collects Hermes usage from the local `~/.hermes/state.db` database in read-only mode, counting every local session source (TUI, desktop app, delegated subagents, automation) so the totals match Hermes's own insights report.
@@ -46,9 +46,21 @@ Hovering any model row opens a small card with the tokens behind that model's to
 - The sidecar is local-only, mode `0600`, atomic, and contains only bounded provider/model token aggregates. It never reads transcripts, prompts, conversations, databases, credentials, or endpoints. Native provider records remain authoritative whenever they publish a period.
 - Providers that do not publish model-token history show a generic unavailable message; quota and credit fields are never relabeled as token usage.
 
+## API equivalent (Claude Code)
+
+The Claude Code tab shows a fourth card, **API equiv.**, beside Today, Last 7 Days, and All Time. It prices the record's lifetime per-model buckets (`modelUsage`) at Anthropic's API list prices. That answers what the same usage would have cost on the API instead of a subscription. It is an estimate, not a bill.
+
+- **Range.** Records do not say whether a cache write used the 5-minute cache (1.25× base input) or the 1-hour cache (2×). The card shows the 5-minute total as its value and the 1-hour total as `to $…`.
+- **Hover card.** Cost per bucket (cache read, cache write, input, output), the same prompts without caching (every cached token at base input price), what caching saved, tokens left unpriced, and the date of the price list.
+- **Price list.** `anthropic-prices.js` is a static data module imported by the panel: USD per million tokens per model, with the source URL and the date it was checked. Nothing is fetched or read from disk at runtime. Update the table and `checkedAt` when Anthropic's pricing page changes.
+- **Unpriced models.** A model missing from the list, or one whose record carries only a total without per-bucket detail, is left out of the estimate and counted under **Unpriced**.
+- **Not covered.** All time only: the period filters keep no per-bucket history. Claude Haiku 5.5 is priced at its tier for prompts up to 100,000 tokens, since records keep no prompt lengths. Fast mode, the Batch API discount, and the US-only inference multiplier are ignored.
+
 ## Interface
 
 Version 1.11.0 refreshes the dashboard with a wider layout, clearer provider and subscription filters, usage totals and the daily chart before secondary details, and compact refresh, settings, and close controls. The panel uses an opaque, theme-coloured reading surface without changing global theme settings. That visual refresh did not change collector logic, token accounting, settings persistence, or process protections.
+
+Version 1.12.0 adds the **API equiv.** card to the Claude Code tab: the all-time tokens priced at Anthropic API list prices, as a 5-minute to 1-hour cache-write range, with a hover card splitting cache and non-cache costs (see [API equivalent](#api-equivalent-claude-code)). With four cards on that tab, the card values use a smaller font.
 
 Version 1.11.6 fills the All Time card for Omarchy's stock records (Claude Code, OpenCode, Ollama, Z.ai), which publish no cumulative total: the card now sums their lifetime per-model buckets (input, output, cache read, and cache write) instead of showing 0. Version 1.11.5 passes the fixed `PATH=/usr/bin` to collectors, so Omarchy's stock Claude Code collector finds `rg` and counts pi and omp sessions again. Version 1.11.4 bounds every internal read for the marketplace review: Antigravity CLI output, Grok RPC replies, the Hermes usage query and whole-file reads are capped inside the collectors, and the panel now reads usage records only through the bounded scan helper (see [Bounded reads inside the collectors](#bounded-reads-inside-the-collectors)). Records refresh after each collector run and once a minute. Version 1.11.3 keeps Claude Code and Grok refreshing on Omarchy 4.5. Omarchy's stock collectors now require `OMARCHY_PATH`, so the plugin passes the fixed `/usr/share/omarchy` root in its otherwise minimal child environment. The stock Hermes and `agy` collectors are skipped, because this plugin's own Hermes and Antigravity collectors already write those records.
 
