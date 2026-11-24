@@ -44,6 +44,10 @@ class TestQmlUsageSummary(unittest.TestCase):
         self.assertIn("safeTokenNumber", all_time)
         self.assertNotIn("recentDays", all_time)
         self.assertNotIn("messageCount", all_time)
+        # Omarchy's stock records publish no cumulative total; their lifetime
+        # per-model buckets are summed through tokenParts instead of showing 0.
+        self.assertIn("source.modelUsage", all_time)
+        self.assertIn("root.tokenParts(", all_time)
         section = self.block(self.panel, "id: usageSection", "// ---------- Models")
         self.assertIn('title: "All Time"', section)
         self.assertIn("usageSection.allTimeTokens", section)
