@@ -213,7 +213,7 @@ class TestQmlProcessBoundary(unittest.TestCase):
 
     def test_minimal_explicit_environment(self):
         self.assertIn("clearEnvironment: true", self.main)
-        self.assertIn('minimalChildEnv: ({ "HOME": root.home, "OMARCHY_PATH": root.omarchyRoot })', self.main)
+        self.assertIn('minimalChildEnv: ({ "HOME": root.home, "OMARCHY_PATH": root.omarchyRoot, "PATH": "/usr/bin" })', self.main)
         spawns = self.main.count("Process {")
         cleared = self.main.count("clearEnvironment: true")
         self.assertEqual(cleared, spawns)

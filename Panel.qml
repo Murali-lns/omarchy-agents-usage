@@ -446,12 +446,18 @@ Panel {
   }
 
   // The All Time card reads the record's cumulative total as published; it
-  // never extrapolates one from the daily window.
+  // never extrapolates one from the daily window. Omarchy's stock collectors
+  // publish no cumulative total, only the lifetime per-model buckets in
+  // modelUsage, so their sum stands in for it.
   function allTimeTokenTotal(source) {
     if (!source) return 0
     var total = root.safeTokenNumber(source.totalTokens)
     if (total > 0) return total
-    return root.safeTokenNumber(source.tokens)
+    total = root.safeTokenNumber(source.tokens)
+    if (total > 0) return total
+    if (!root.isPlainObject(source.modelUsage)) return 0
+    for (var modelId in source.modelUsage) total += root.tokenParts(source.modelUsage[modelId]).total
+    return total
   }
 
   function dayOfMonth(date) {
