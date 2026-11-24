@@ -49,8 +49,11 @@ Item {
   // (`/usr/bin/bash <script>` or `/usr/bin/python3 <script>`), so shebang
   // lines are never consulted and nothing referenced here resolves via PATH.
   // Omarchy 4.5 stock collectors exit with KeyError when OMARCHY_PATH is
-  // unset, so the fixed trusted Omarchy root is passed alongside HOME.
-  readonly property var minimalChildEnv: ({ "HOME": root.home, "OMARCHY_PATH": root.omarchyRoot })
+  // unset, so the fixed trusted Omarchy root is passed alongside HOME. They
+  // also locate helpers such as rg through shutil.which; without PATH they
+  // only search user directories, miss /usr/bin/rg, and silently skip pi and
+  // omp sessions, so the fixed system directory is passed as PATH.
+  readonly property var minimalChildEnv: ({ "HOME": root.home, "OMARCHY_PATH": root.omarchyRoot, "PATH": "/usr/bin" })
 
   readonly property int collectorDeadlineMs: 120000
   readonly property int discoveryDeadlineMs: 20000

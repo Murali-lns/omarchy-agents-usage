@@ -44,10 +44,15 @@ class TestQmlUsageSummary(unittest.TestCase):
         self.assertIn("safeTokenNumber", all_time)
         self.assertNotIn("recentDays", all_time)
         self.assertNotIn("messageCount", all_time)
+        # Omarchy's stock records publish no cumulative total; their lifetime
+        # per-model buckets are summed through tokenParts instead of showing 0.
+        self.assertIn("source.modelUsage", all_time)
+        self.assertIn("root.tokenParts(", all_time)
         section = self.block(self.panel, "id: usageSection", "// ---------- Models")
         self.assertIn('title: "All Time"', section)
         self.assertIn("usageSection.allTimeTokens", section)
-        self.assertIn("(width - spacing * 2) / 3", section)
+        self.assertIn("(width - spacing * (cardCount - 1)) / cardCount", section)
+        self.assertIn("apiCostCard.visible ? 4 : 3", section)
 
     def test_summary_cards_and_daily_chart_are_wired(self):
         section = self.block(self.panel, "id: usageSection", "// ---------- Models")

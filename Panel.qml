@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "anthropic-prices.js" as AnthropicPrices
 
 Panel {
   id: root
@@ -446,12 +447,18 @@ Panel {
   }
 
   // The All Time card reads the record's cumulative total as published; it
-  // never extrapolates one from the daily window.
+  // never extrapolates one from the daily window. Omarchy's stock collectors
+  // publish no cumulative total, only the lifetime per-model buckets in
+  // modelUsage, so their sum stands in for it.
   function allTimeTokenTotal(source) {
     if (!source) return 0
     var total = root.safeTokenNumber(source.totalTokens)
     if (total > 0) return total
-    return root.safeTokenNumber(source.tokens)
+    total = root.safeTokenNumber(source.tokens)
+    if (total > 0) return total
+    if (!root.isPlainObject(source.modelUsage)) return 0
+    for (var modelId in source.modelUsage) total += root.tokenParts(source.modelUsage[modelId]).total
+    return total
   }
 
   function dayOfMonth(date) {
@@ -621,6 +628,77 @@ Panel {
       { glyph: "\uf0e7", label: "Cache read", value: row.cacheRead },
       { glyph: "\uf040", label: "Cache write", value: row.cacheWrite }
     ]
+  }
+
+  // Anthropic's price list keys models without the date suffix Claude Code
+  // ids may carry (claude-haiku-4-5-20251001).
+  function anthropicPriceFor(modelId) {
+    var id = String(modelId || "").toLowerCase().replace(/-\d{8}$/, "")
+    return AnthropicPrices.models.hasOwnProperty(id) ? AnthropicPrices.models[id] : null
+  }
+
+  // What the lifetime per-model buckets would cost at Anthropic API list
+  // prices. Records do not say whether a cache write used the 5-minute or the
+  // 1-hour cache, so writes are priced at both: `low` and `high` bound the
+  // estimate. A model without a listed price or without per-bucket detail is
+  // left out and counted in `unpricedTokens`.
+  function apiCostEstimate(source) {
+    var est = { low: 0, high: 0, input: 0, output: 0, cacheRead: 0, cacheWriteLow: 0, cacheWriteHigh: 0,
+                noCache: 0, pricedTokens: 0, unpricedTokens: 0 }
+    if (!source || !isPlainObject(source.modelUsage)) return est
+    for (var modelId in source.modelUsage) {
+      var parts = tokenParts(source.modelUsage[modelId])
+      if (!(parts.total > 0)) continue
+      var price = anthropicPriceFor(modelId)
+      if (!price || !parts.hasBreakdown) {
+        est.unpricedTokens += parts.total
+        continue
+      }
+      est.input += parts.input * price.input / 1e6
+      est.output += parts.output * price.output / 1e6
+      est.cacheRead += parts.cacheRead * price.cacheRead / 1e6
+      est.cacheWriteLow += parts.cacheWrite * price.cacheWrite5m / 1e6
+      est.cacheWriteHigh += parts.cacheWrite * price.cacheWrite1h / 1e6
+      // The same prompts sent without caching pay base input for every token.
+      est.noCache += (parts.input + parts.cacheRead + parts.cacheWrite) * price.input / 1e6
+        + parts.output * price.output / 1e6
+      est.pricedTokens += parts.total
+    }
+    est.low = est.input + est.output + est.cacheRead + est.cacheWriteLow
+    est.high = est.input + est.output + est.cacheRead + est.cacheWriteHigh
+    return est
+  }
+
+  function formatUsd(n) {
+    if (!(n > 0)) return "$0"
+    if (n >= 1e6) return "$" + (n / 1e6).toFixed(1) + "M"
+    if (n >= 1e3) return "$" + (n / 1e3).toFixed(1) + "k"
+    if (n >= 10) return "$" + Math.round(n)
+    if (n >= 0.01) return "$" + n.toFixed(2)
+    return "<$0.01"
+  }
+
+  function formatUsdRange(low, high) {
+    var a = formatUsd(low)
+    var b = formatUsd(high)
+    return a === b ? a : a + "–" + b.replace(/^\$/, "")
+  }
+
+  // The API equiv. hover card: cost per bucket first, then what caching saved.
+  function apiCostRows(est) {
+    if (!est) return []
+    var rows = [
+      { glyph: "\uf0e7", label: "Cache read", text: formatUsd(est.cacheRead) },
+      { glyph: "\uf040", label: "Cache write", text: formatUsdRange(est.cacheWriteLow, est.cacheWriteHigh) },
+      { glyph: "\uf063", label: "In", text: formatUsd(est.input) },
+      { glyph: "\uf062", label: "Out", text: formatUsd(est.output) },
+      { glyph: "", label: "Without cache", text: formatUsd(est.noCache) },
+      { glyph: "", label: "Saved", text: formatUsdRange(est.noCache - est.high, est.noCache - est.low) }
+    ]
+    if (est.unpricedTokens > 0)
+      rows.push({ glyph: "", label: "Unpriced", text: usage.formatTokenCount(est.unpricedTokens) + " tok" })
+    rows.push({ glyph: "", label: "Prices", text: AnthropicPrices.checkedAt })
+    return rows
   }
 
   // Only speaks up when the numbers cover more than this machine.
@@ -1013,26 +1091,35 @@ Panel {
             readonly property real todayTokens: root.todayTokenTotal(source)
             readonly property real weekTokens: root.weekTokenTotal(days)
             readonly property real allTimeTokens: root.allTimeTokenTotal(source)
+            // Anthropic list prices only describe the Claude Code tab.
+            readonly property var apiCost: (root.provider && root.provider.providerId === "claude")
+              ? root.apiCostEstimate(source) : null
             visible: !!root.provider && days.length > 0
             width: parent.width
             spacing: Style.spacing.md
 
             // Period cards: today carries the accent fill so the current day
             // reads first; the seven-day and all-time totals sit quieter beside it.
+            // The Claude Code tab adds the all-time API list-price equivalent.
             Row {
               id: usageCards
               width: parent.width
               spacing: Style.space(8)
 
-              readonly property real cardWidth: (width - spacing * 2) / 3
+              readonly property int cardCount: apiCostCard.visible ? 4 : 3
+              readonly property real cardWidth: (width - spacing * (cardCount - 1)) / cardCount
+              // Four cards leave too little width for display-size values.
+              readonly property int valueSize: cardCount > 3 ? Style.font.heading : Style.font.display
               // Equal heights even when one card's note wraps and another's does not.
               readonly property real cardHeight: Math.max(todayCard.implicitHeight,
-                weekCard.implicitHeight, allTimeCard.implicitHeight)
+                weekCard.implicitHeight, allTimeCard.implicitHeight,
+                apiCostCard.visible ? apiCostCard.implicitHeight : 0)
 
               UsageCard {
                 id: todayCard
                 width: usageCards.cardWidth
                 height: usageCards.cardHeight
+                valueSize: usageCards.valueSize
                 title: "Today"
                 value: usageSection.todayTokens
                 highlighted: true
@@ -1042,6 +1129,7 @@ Panel {
                 id: weekCard
                 width: usageCards.cardWidth
                 height: usageCards.cardHeight
+                valueSize: usageCards.valueSize
                 title: "Last 7 Days"
                 value: usageSection.weekTokens
                 highlighted: false
@@ -1051,10 +1139,29 @@ Panel {
                 id: allTimeCard
                 width: usageCards.cardWidth
                 height: usageCards.cardHeight
+                valueSize: usageCards.valueSize
                 title: "All Time"
                 value: usageSection.allTimeTokens
                 note: "Recorded total"
                 highlighted: false
+              }
+
+              UsageCard {
+                id: apiCostCard
+                readonly property var est: usageSection.apiCost
+                visible: !!est && est.pricedTokens > 0
+                width: usageCards.cardWidth
+                height: usageCards.cardHeight
+                valueSize: usageCards.valueSize
+                title: "API equiv."
+                caption: "USD"
+                valueText: est ? root.formatUsd(est.low) : ""
+                note: est && root.formatUsd(est.high) !== root.formatUsd(est.low)
+                  ? "to " + root.formatUsd(est.high) : "List price"
+                highlighted: false
+                breakdownHeading: "API EQUIVALENT"
+                breakdown: root.apiCostRows(est)
+                breakdownMaxWidth: usageCards.width
               }
             }
 
@@ -1733,15 +1840,22 @@ Panel {
 
   // A period summary card: period title, token caption, the total, and the
   // observed-subtotal note. Today carries the accent fill so the current
-  // period reads first; Last 7 Days stays quiet.
+  // period reads first; Last 7 Days stays quiet. A card given breakdown rows
+  // opens them in a hover card below itself.
   component UsageCard: BorderSurface {
     id: usageCard
     property string title: ""
     property real value: 0
+    property string valueText: usage.formatTokenCount(usageCard.value)
+    property int valueSize: Style.font.display
+    property string caption: "TOKENS"
     // The mock's longer "observed subtotal" phrasing overflows the card at
     // large font bases; these two words carry the same provenance note.
     property string note: "Partial · observed"
     property bool highlighted: false
+    property var breakdown: []
+    property string breakdownHeading: ""
+    property real breakdownMaxWidth: usageCard.width
 
     implicitHeight: cardBody.implicitHeight + Style.space(14) * 2
     color: root.alpha(root.foreground, usageCard.highlighted ? 0.11 : 0.035)
@@ -1780,7 +1894,7 @@ Panel {
         Text {
           id: cardCaption
           textFormat: Text.PlainText
-          text: "TOKENS"
+          text: usageCard.caption
           // Three cards share the row; drop the caption before the title elides.
           visible: cardTitle.implicitWidth + implicitWidth + Style.space(4) <= parent.width
           color: root.dim
@@ -1793,12 +1907,12 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        text: usage.formatTokenCount(usageCard.value)
+        text: usageCard.valueText
         width: parent.width
         elide: Text.ElideRight
         color: root.foreground
         font.family: root.fontFamily
-        font.pixelSize: Style.font.display
+        font.pixelSize: usageCard.valueSize
         font.bold: true
       }
 
@@ -1813,6 +1927,22 @@ Panel {
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
       }
+    }
+
+    MouseArea {
+      id: usageCardHover
+      anchors.fill: parent
+      hoverEnabled: usageCard.breakdown.length > 0
+      acceptedButtons: Qt.NoButton
+    }
+
+    ModelBreakdownCard {
+      visible: usageCardHover.containsMouse && usageCard.breakdown.length > 0
+      heading: usageCard.breakdownHeading
+      entries: usageCard.breakdown
+      cardWidth: Style.space(230)
+      maxWidth: usageCard.breakdownMaxWidth
+      below: true
     }
   }
 
@@ -1984,12 +2114,17 @@ Panel {
   // The hover card for a model row: the model's token buckets as a small
   // labelled box on the shared tooltip surface. It lifts above the row so
   // rows near the bottom of the dashboard never push it past the panel edge.
+  // A usage card reuses it below itself, with preformatted `text` entries.
   component ModelBreakdownCard: ToolTip {
     id: breakdown
 
     property var row: null
+    property string heading: "TOKENS BY MODEL"
+    property var entries: root.modelBreakdownRows(row)
+    property real cardWidth: Style.space(190)
+    property real maxWidth: parent ? parent.width : cardWidth
+    property bool below: false
 
-    readonly property var entries: root.modelBreakdownRows(row)
     readonly property color entryColor: Color.tooltip.text
     readonly property color entryDim: root.alpha(entryColor, 0.8)
 
@@ -2003,9 +2138,11 @@ Panel {
     // Flush with the row's left edge, lifted just above it. The width is
     // fixed rather than content-implied, so the value column never shifts
     // between models; the card narrows only if the panel itself is narrower.
-    x: 0
-    y: -implicitHeight - Style.space(4)
-    width: Math.min(parent ? parent.width : Style.space(190), Style.space(190))
+    // A card wider than its owner shares the owner's right edge, so the last
+    // usage card's breakdown stays inside the panel.
+    x: parent ? Math.min(0, parent.width - width) : 0
+    y: below ? (parent ? parent.height : 0) + Style.space(4) : -implicitHeight - Style.space(4)
+    width: Math.min(maxWidth, cardWidth)
 
     background: BorderSurface {
       color: Color.tooltip.background
@@ -2019,7 +2156,7 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        text: "TOKENS BY MODEL"
+        text: breakdown.heading
         width: cardBody.width
         color: breakdown.entryColor
         font.family: root.fontFamily
@@ -2070,7 +2207,8 @@ Panel {
           Text {
             id: valueText
             textFormat: Text.PlainText
-            text: modelData.value > 0 ? usage.formatTokenCount(modelData.value) : "—"
+            text: modelData.text !== undefined ? modelData.text
+              : modelData.value > 0 ? usage.formatTokenCount(modelData.value) : "—"
             color: breakdown.entryColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall

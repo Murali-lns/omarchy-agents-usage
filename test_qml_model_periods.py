@@ -92,7 +92,8 @@ class TestQmlModelPeriods(unittest.TestCase):
         self.assertIn("hasBreakdown", entries)
         card = self.panel[self.panel.index("component ModelBreakdownCard"):]
         self.assertIn("ModelBreakdownCard {", self.panel)
-        self.assertIn('text: "TOKENS BY MODEL"', card)
+        self.assertIn('heading: "TOKENS BY MODEL"', card)
+        self.assertIn("text: breakdown.heading", card)
         self.assertIn('"—"', card)
         self.assertIn("modelBreakdownRows", card)
 
@@ -114,7 +115,7 @@ class TestQmlModelPeriods(unittest.TestCase):
 
     def test_manifest_and_primary_collectors_cover_every_supported_provider(self):
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.11.4")
+        self.assertEqual(manifest["version"], "1.12.0")
         providers = manifest["barWidget"]["defaults"]["providers"]
         self.assertEqual(
             set(providers),
