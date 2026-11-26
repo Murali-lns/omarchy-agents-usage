@@ -52,6 +52,15 @@ Item {
   // unset, so the fixed trusted Omarchy root is passed alongside HOME.
   readonly property var minimalChildEnv: ({ "HOME": root.home, "OMARCHY_PATH": root.omarchyRoot })
 
+  // Accounts belong to Omarchy: `omarchy agent account` owns the registry and
+  // every sign-in. The panel only shows the accounts a record lists and hands
+  // each change to the matching packaged command, run like any other spawn.
+  readonly property var accountProviderIds: ["claude", "codex", "grok"]
+  readonly property string accountCommandDir: root.omarchyRoot + "/bin"
+  readonly property int accountDeadlineMs: 30000
+  readonly property int maxAccounts: 16
+  readonly property int maxQueuedAccountCommands: 8
+
   readonly property int collectorDeadlineMs: 120000
   readonly property int discoveryDeadlineMs: 20000
   readonly property int syncDeadlineMs: 30000
@@ -120,6 +129,12 @@ Item {
     interval: root.syncDeadlineMs
     repeat: false
     onTriggered: root.killLeaked(syncScanProcess, syncScanExitGuard)
+  }
+  Timer {
+    id: accountDeadlineTimer
+    interval: root.accountDeadlineMs
+    repeat: false
+    onTriggered: root.killLeaked(accountProcess, accountExitGuard)
   }
 
   // Process objects expose a signal(int) that is delivered to the direct
@@ -267,6 +282,11 @@ Item {
     id: syncScanExitGuard
     property bool active: false
     onActiveChanged: if (active) syncScanDeadlineTimer.restart()
+  }
+  QtObject {
+    id: accountExitGuard
+    property bool active: false
+    onActiveChanged: if (active) accountDeadlineTimer.restart()
   }
 
   property var agentIds: []
@@ -801,6 +821,137 @@ Item {
   // recent scans in this mode.
   function refreshLimits() { runUpdate("limits") }
 
+  // -------------------------------------------------------------- accounts
+  //
+  // One account command at a time, in the order they were asked for. A
+  // finished command refreshes that provider's limits, so the active account
+  // and the switch settings shown come back from Omarchy's own record.
+
+  property var pendingAccountCommands: []
+  property string accountCommandProvider: ""
+  property string accountError: ""
+  // The stderr stream can finish on either side of the exit, so its first
+  // line is kept and only becomes the error once the command has failed.
+  property string accountStderr: ""
+  property bool accountFailed: false
+  readonly property bool accountCommandRunning: accountProcess.running || pendingAccountCommands.length > 0
+
+  Process {
+    id: accountProcess
+    running: false
+    clearEnvironment: true
+    environment: root.minimalChildEnv
+    workingDirectory: "/"
+    onExited: function(exitCode) {
+      accountExitGuard.active = false
+      root.accountFailed = exitCode !== 0
+      if (root.accountFailed) {
+        root.accountError = root.accountStderr !== "" ? root.accountStderr : "The account change did not go through."
+      } else {
+        root.accountError = ""
+        root.runUpdate("limits", [root.accountCommandProvider])
+      }
+      root.pumpAccountQueue()
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        // supervised-run.sh capped this stream producer-side; the panel shows
+        // at most one short line of it.
+        var message = String(text || "").trim().split("\n")[0]
+        if (message.length > 200) message = message.substring(0, 200)
+        root.accountStderr = message
+        if (root.accountFailed && message !== "") root.accountError = message
+      }
+    }
+  }
+
+  function accountsSupported(providerId) {
+    return root.accountProviderIds.indexOf(String(providerId || "")) >= 0
+  }
+
+  // Registry ids are short slugs; anything else is never put on a command line.
+  function isAccountId(id) {
+    return typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)
+  }
+
+  function boundedText(value, max) {
+    return String(value === undefined || value === null ? "" : value).slice(0, max)
+  }
+
+  // The record's `accounts`, only for providers Omarchy manages accounts for,
+  // with every field bounded and typed before the panel binds to it.
+  function accountList(raw, providerId) {
+    if (!accountsSupported(providerId) || !Array.isArray(raw)) return []
+    var out = []
+    for (var i = 0; i < raw.length && out.length < root.maxAccounts; i++) {
+      var account = raw[i]
+      if (!isPlainObject(account) || !isAccountId(account.id)) continue
+      out.push({
+        id: account.id,
+        label: boundedText(account.label || account.id, 64),
+        email: boundedText(account.email, 128),
+        plan: boundedText(account.plan, 48),
+        active: account.active === true,
+        primary: account.primary === true,
+        limits: Array.isArray(account.limits) ? account.limits.slice(0, 8) : [],
+        stale: account.stale === true,
+        usageStatusText: boundedText(account.usageStatusText, 64),
+        authHelpText: boundedText(account.authHelpText, 400)
+      })
+    }
+    return out
+  }
+
+  function accountSwitchValue(raw) {
+    var threshold = Math.round(Number(raw && raw.threshold))
+    return {
+      mode: !!raw && raw.mode === "auto" ? "auto" : "manual",
+      threshold: isFinite(threshold) ? Math.max(50, Math.min(100, threshold)) : 95
+    }
+  }
+
+  // kind: "use" (account id), "rename" (account id, label) or "mode"
+  // ("auto"/"manual", threshold). Arguments are checked here, not trusted
+  // from the caller, because they end up on a command line.
+  function runAccountCommand(kind, providerId, args) {
+    if (!accountsSupported(providerId) || !Array.isArray(args)) return false
+    var valid = false
+    if (kind === "use") valid = args.length === 1 && isAccountId(args[0])
+    else if (kind === "rename")
+      valid = args.length === 2 && isAccountId(args[0]) && /^[^\u0000-\u001f\u007f]{1,40}$/.test(String(args[1]))
+    else if (kind === "mode")
+      valid = args.length === 2 && (args[0] === "auto" || args[0] === "manual")
+        && /^\d{2,3}$/.test(String(args[1])) && Number(args[1]) >= 50 && Number(args[1]) <= 100
+    if (!valid || pendingAccountCommands.length >= root.maxQueuedAccountCommands) return false
+    var argv = [root.binBash, root.accountCommandDir + "/omarchy-agent-account-" + kind, String(providerId)]
+    for (var i = 0; i < args.length; i++) argv.push(String(args[i]))
+    var queued = pendingAccountCommands.slice()
+    queued.push({ providerId: String(providerId), argv: argv })
+    pendingAccountCommands = queued
+    root.accountError = ""
+    root.pumpAccountQueue()
+    return true
+  }
+
+  function pumpAccountQueue() {
+    if (accountProcess.running || pendingAccountCommands.length === 0) return
+    var next = pendingAccountCommands[0]
+    pendingAccountCommands = pendingAccountCommands.slice(1)
+    root.accountCommandProvider = next.providerId
+    root.accountStderr = ""
+    root.accountFailed = false
+    accountProcess.command = root.supervisedCommand(next.argv)
+    accountExitGuard.active = true
+    accountProcess.running = true
+    if (!accountProcess.running) {
+      accountExitGuard.active = false
+      root.accountError = "The account command could not start."
+      root.pumpAccountQueue()
+    }
+  }
+
   // ------------------------------------------------------------- providers
 
   // An agent earns a place in the bar and the panel by being switched on in
@@ -949,6 +1100,10 @@ Item {
       hasPromptStats: synced ? (stats.hasPromptStats !== false) : (record.hasPromptStats !== false),
 
       routes: displayRoutes(record.routes, providerId),
+
+      // Per-account, like limits: never merged across devices.
+      accounts: accountList(record.accounts, providerId),
+      accountSwitch: accountSwitchValue(record.accountSwitch),
 
       syncEnabled: synced,
       syncDeviceCount: deviceCount,

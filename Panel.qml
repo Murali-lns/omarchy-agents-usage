@@ -217,6 +217,116 @@ Panel {
     root.close()
   }
 
+  // ---------------------------------------------------------------- accounts
+  //
+  // Omarchy keeps the accounts (`omarchy agent account`); this panel lists the
+  // ones a record carries and asks Omarchy to change them through Main's
+  // supervised spawns. Signing in needs a browser and, for Claude, a code
+  // pasted back, so it runs in a floating terminal instead.
+
+  readonly property var accounts: root.provider && Array.isArray(root.provider.accounts) ? root.provider.accounts : []
+  readonly property bool canAddAccount: !!root.provider && usage.accountsSupported(root.provider.providerId)
+  property string renamingAccountId: ""
+
+  // A switch change shows at once, then gives way to the record once the
+  // refreshed limits carry the same setting (or the command fails).
+  property var accountSwitchEcho: ({})
+  readonly property var accountSwitch: {
+    if (!root.provider) return { mode: "manual", threshold: 95 }
+    var echo = root.accountSwitchEcho[root.provider.providerId]
+    if (echo) return echo
+    return root.provider.accountSwitch || ({ mode: "manual", threshold: 95 })
+  }
+
+  onProvidersChanged: root.reconcileAccountSwitchEcho()
+
+  Connections {
+    target: usage
+    function onAccountErrorChanged() { if (usage.accountError !== "") root.accountSwitchEcho = ({}) }
+  }
+
+  function reconcileAccountSwitchEcho() {
+    var next = {}
+    var changed = false
+    for (var id in root.accountSwitchEcho) {
+      var echo = root.accountSwitchEcho[id]
+      var current = null
+      for (var i = 0; i < root.providers.length; i++)
+        if (root.providers[i].providerId === id) current = root.providers[i].accountSwitch
+      if (current && current.mode === echo.mode && current.threshold === echo.threshold) { changed = true; continue }
+      next[id] = echo
+    }
+    if (changed) root.accountSwitchEcho = next
+  }
+
+  function signInCommand(providerId, reauthId) {
+    if (!usage.accountsSupported(providerId)) return ""
+    var args = ["omarchy", "agent", "account", "add"]
+    if (reauthId !== undefined) {
+      if (reauthId !== ":primary" && !usage.isAccountId(reauthId)) return ""
+      args.push("--reauth", reauthId)
+    }
+    args.push(providerId)
+    return "omarchy-launch-floating-terminal-with-presentation " + args.join(" ")
+  }
+
+  // The terminal takes focus, so the panel steps aside; reopening it refreshes
+  // the limits, which brings the new or renewed account in.
+  function openSignIn(command) {
+    if (command === "" || !root.bar) return
+    root.bar.run(command)
+    root.close()
+  }
+
+  function addAccount() {
+    if (root.canAddAccount) root.openSignIn(root.signInCommand(root.provider.providerId))
+  }
+
+  function signInAgain(account) {
+    if (root.provider && account)
+      root.openSignIn(root.signInCommand(root.provider.providerId, account.primary ? ":primary" : account.id))
+  }
+
+  function accountNeedsSignIn(account) {
+    var status = String(account && account.usageStatusText || "")
+    return status === "Sign-in expired" || status === "Waiting for auth"
+  }
+
+  // email · plan · every window's percentage.
+  function accountDetail(account) {
+    if (!account) return ""
+    var parts = []
+    if (account.email !== "" && account.email !== account.label) parts.push(account.email)
+    if (account.plan !== "") parts.push(account.plan)
+    var windows = root.limitWindows(account)
+    for (var i = 0; i < windows.length; i++)
+      if (windows[i].percent >= 0) parts.push(windows[i].title + " " + Math.round(windows[i].percent * 100) + "%")
+    return parts.join(" · ")
+  }
+
+  function useAccount(account) {
+    if (root.provider && account && !account.active)
+      usage.runAccountCommand("use", root.provider.providerId, [account.id])
+  }
+
+  function renameAccount(account, label) {
+    var name = String(label || "").trim()
+    if (!root.provider || !account || name === "" || name === account.label) return
+    usage.runAccountCommand("rename", root.provider.providerId, [account.id, name])
+  }
+
+  function setAccountSwitch(mode, threshold) {
+    if (!root.provider) return
+    var next = { mode: mode, threshold: root.clamp(threshold, 50, 100) }
+    if (next.mode === root.accountSwitch.mode && next.threshold === root.accountSwitch.threshold) return
+    var id = root.provider.providerId
+    if (!usage.runAccountCommand("mode", id, [next.mode, String(next.threshold)])) return
+    var echoes = {}
+    for (var key in root.accountSwitchEcho) echoes[key] = root.accountSwitchEcho[key]
+    echoes[id] = next
+    root.accountSwitchEcho = echoes
+  }
+
   // ---------------------------------------------------------------- limits
   //
   // Both providers report the same two shapes: a short rolling session window
@@ -872,6 +982,13 @@ Panel {
               spacing: Style.space(4)
 
               DashboardButton {
+                visible: root.canAddAccount
+                text: "+ Account"
+                tooltipText: "Add a " + (root.provider ? root.provider.providerName : "") + " account (opens a terminal)"
+                onClicked: root.addAccount()
+              }
+
+              DashboardButton {
                 text: "\uf021"
                 tooltipText: "Refresh usage (R)"
                 onClicked: root.refreshNow()
@@ -996,6 +1113,130 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
+            }
+          }
+
+          // ---------- Accounts ----------
+          PanelSeparator {
+            visible: accountsSection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: accountsSection
+            visible: root.accounts.length >= 2
+            width: parent.width
+            spacing: Style.space(12)
+
+            PanelSectionHeader {
+              text: "ACCOUNTS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.accounts
+
+              AccountRow {
+                required property var modelData
+                width: accountsSection.width
+                account: modelData
+              }
+            }
+
+            // Auto-switch moves new sessions to the account with the most room
+            // once the active one reaches the threshold; manual only notifies.
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(autoSwitchText.implicitHeight, thresholdStepper.implicitHeight, autoSwitchToggle.implicitHeight)
+
+              Column {
+                id: autoSwitchText
+                anchors.left: parent.left
+                anchors.right: thresholdStepper.left
+                anchors.rightMargin: Style.spacing.sm
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Auto-switch"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: root.accountSwitch.mode === "auto"
+                    ? "New sessions move to the account with the most room at " + root.accountSwitch.threshold + "%"
+                    : "Notifies at " + root.accountSwitch.threshold + "%; you pick the account"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Row {
+                id: thresholdStepper
+                anchors.right: autoSwitchToggle.left
+                anchors.rightMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+
+                DashboardButton {
+                  text: "−"
+                  tooltipText: "Lower the threshold by 5%"
+                  enabled: !usage.accountCommandRunning && root.accountSwitch.threshold > 50
+                  fontSize: Style.font.caption
+                  horizontalPadding: Style.space(8)
+                  verticalPadding: Style.space(3)
+                  onClicked: root.setAccountSwitch(root.accountSwitch.mode, root.accountSwitch.threshold - 5)
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.accountSwitch.threshold + "%"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                DashboardButton {
+                  text: "+"
+                  tooltipText: "Raise the threshold by 5%"
+                  enabled: !usage.accountCommandRunning && root.accountSwitch.threshold < 100
+                  fontSize: Style.font.caption
+                  horizontalPadding: Style.space(8)
+                  verticalPadding: Style.space(3)
+                  onClicked: root.setAccountSwitch(root.accountSwitch.mode, root.accountSwitch.threshold + 5)
+                }
+              }
+
+              ToggleSwitch {
+                id: autoSwitchToggle
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                checked: root.accountSwitch.mode === "auto"
+                busy: usage.accountCommandRunning
+                cursorRing: false
+                foreground: root.foreground
+                onToggled: root.setAccountSwitch(checked ? "manual" : "auto", root.accountSwitch.threshold)
+              }
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: usage.accountError !== ""
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: usage.accountError
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
           }
 
@@ -1601,6 +1842,148 @@ Panel {
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
+    }
+  }
+
+  // One registered account: its name (click to rename), email, plan and
+  // windows, the fullest window's meter, and Active / Use / Sign in again.
+  component AccountRow: Column {
+    id: accountRow
+    property var account: null
+
+    readonly property bool editing: !!account && root.renamingAccountId === account.id
+    readonly property var fullest: root.bindingWindow(account)
+    readonly property bool needsSignIn: root.accountNeedsSignIn(account)
+
+    function finishRename(commit) {
+      if (!editing) return
+      var label = nameField.text
+      root.renamingAccountId = ""
+      if (commit) root.renameAccount(account, label)
+      keyCatcher.forceActiveFocus()
+    }
+
+    spacing: Style.space(6)
+
+    Item {
+      width: parent.width
+      implicitHeight: Math.max(nameText.implicitHeight, accountRow.editing ? nameField.implicitHeight : 0, accountAction.implicitHeight)
+
+      Text {
+        id: nameText
+        visible: !accountRow.editing
+        textFormat: Text.PlainText
+        text: accountRow.account ? accountRow.account.label : ""
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        font.bold: !!accountRow.account && accountRow.account.active
+        elide: Text.ElideRight
+        width: Math.min(implicitWidth, parent.width - accountAction.width - Style.spacing.sm)
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+
+        MouseArea {
+          anchors.fill: parent
+          enabled: !usage.accountCommandRunning
+          cursorShape: Qt.IBeamCursor
+          onClicked: root.renamingAccountId = accountRow.account.id
+        }
+      }
+
+      TextField {
+        id: nameField
+        visible: accountRow.editing
+        anchors.left: parent.left
+        anchors.right: accountAction.left
+        anchors.rightMargin: Style.spacing.sm
+        anchors.verticalCenter: parent.verticalCenter
+        foreground: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        horizontalPadding: Style.space(4)
+        verticalPadding: Style.space(1)
+        maximumLength: 40
+        onVisibleChanged: if (visible) {
+          text = accountRow.account ? accountRow.account.label : ""
+          selectAll()
+          forceActiveFocus()
+        }
+        onAccepted: accountRow.finishRename(true)
+        onActiveFocusChanged: if (!activeFocus) accountRow.finishRename(false)
+        Keys.onEscapePressed: function(event) {
+          accountRow.finishRename(false)
+          event.accepted = true
+        }
+      }
+
+      Item {
+        id: accountAction
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        implicitWidth: activeLabel.visible ? activeLabel.implicitWidth
+          : signInButton.visible ? signInButton.implicitWidth : useButton.implicitWidth
+        implicitHeight: activeLabel.visible ? activeLabel.implicitHeight
+          : signInButton.visible ? signInButton.implicitHeight : useButton.implicitHeight
+        width: implicitWidth
+        height: implicitHeight
+
+        Text {
+          id: activeLabel
+          visible: !!accountRow.account && accountRow.account.active && !accountRow.needsSignIn
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
+          text: "Active"
+          color: Color.accent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+
+        DashboardButton {
+          id: signInButton
+          visible: accountRow.needsSignIn
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Sign in again"
+          tooltipText: "Opens a terminal to sign this account in again"
+          fontSize: Style.font.caption
+          verticalPadding: Style.space(3)
+          onClicked: root.signInAgain(accountRow.account)
+        }
+
+        DashboardButton {
+          id: useButton
+          visible: !!accountRow.account && !accountRow.account.active && !accountRow.needsSignIn
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Use"
+          tooltipText: "New sessions use this account; running ones stay put"
+          enabled: !usage.accountCommandRunning
+          fontSize: Style.font.caption
+          verticalPadding: Style.space(3)
+          onClicked: root.useAccount(accountRow.account)
+        }
+      }
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      visible: text !== ""
+      width: parent.width
+      elide: Text.ElideRight
+      text: root.accountDetail(accountRow.account)
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Meter {
+      visible: !!accountRow.fullest && accountRow.fullest.percent >= 0
+      width: parent.width
+      value: accountRow.fullest ? accountRow.fullest.percent : -1
+      alarming: !!accountRow.fullest && accountRow.fullest.percent >= 0.9
     }
   }
 
